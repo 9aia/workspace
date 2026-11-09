@@ -1,3 +1,2 @@
 org = "9aia"
 include_private = true
-exclude = ["workspace"]
