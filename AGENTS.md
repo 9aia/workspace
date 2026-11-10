@@ -19,7 +19,7 @@ inside.
 | `repos/cuora` | secrets broker — sealed, not spilled |
 | `repos/sepia` | session lifecycle — start/resume/teardown |
 | `repos/peregrin` | event-driven orchestration — campaigns, multi-machine |
-| `repos/bupha` | queue engine for event-driven jobs |
+| `repos/bupha` | CI engine — queue → worktree → runner (`shell`/`dagger`/`gha`) → forge status; tamias `type: bupha` content driver |
 | `repos/cicada` | scheduled-work engine — calendars, recurring runs |
 | `repos/pavo` | agent UI / views |
 | `repos/atta` | fungus-garden layer — tended architecture (WIP) |
