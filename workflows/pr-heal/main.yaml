@@ -404,7 +404,7 @@ nodes:
         --argjson timeout 1800000 \
         '{cwd:$cwd, agent:$agent, mode:$mode, timeoutMs:$timeout, text:(
           "CI check \u0027${config.ci_check_name}\u0027 failed on commit \($sha) in this repository.\n\n" +
-          "1. Run the repository's CI check to reproduce the failure.\n" +
+          "1. Run the repository CI check to reproduce the failure.\n" +
           "2. Diagnose and fix the root cause so the check passes.\n" +
           "3. Verify the check exits 0.\n\n" +
           "Do NOT commit, push, or open a PR — leave the changes in the working tree."

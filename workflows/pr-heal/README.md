@@ -63,6 +63,9 @@ No raw `git`/`gh`/`devin` anywhere in `main.yaml`.
    `systemctl --user restart peregrin-campaign` — every
    peregrin-bundle renders into that one shared service.
 
+   > `tamias deploy` **regenerates** this file — re-apply the config
+   > block after every deploy/uninstall cycle.
+
 4. **Agent auth** — the sepia agent (devin) must be authenticated on
    the host; sessions run unattended.
 
