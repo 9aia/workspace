@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "pr-heal params",
+  "type": "object",
+  "properties": {
+    "repo": {
+      "type": "string",
+      "description": "Watched repository as owner/name — REQUIRED per deployment. Drives the webhook repo filter and the status-event repo check.",
+      "default": ""
+    },
+    "webhook_secret_env": {
+      "type": "string",
+      "description": "Env var holding this repo's webhook HMAC secret — the BUPHA_WH_<OWNER>_<REPO> convention (uppercased, '-' → '_'). REQUIRED per deployment; the var must exist in the campaign service env (~/.config/peregrin/env or cuora).",
+      "default": ""
+    },
+    "checkout": {
+      "type": "string",
+      "description": "Local clone path lasius operates on — REQUIRED per deployment.",
+      "default": ""
+    },
+    "node_url": {
+      "type": "string",
+      "description": "Base URL of `peregrin serve` (sessions + entity plane). Default http://127.0.0.1:18787.",
+      "default": "http://127.0.0.1:18787"
+    },
+    "worktree_base": {
+      "type": "string",
+      "description": "Detached heal worktrees and the per-PR attempt ledger land here.",
+      "default": "$HOME/.local/share/pr-heal/worktrees"
+    },
+    "agent": {
+      "type": "string",
+      "description": "sepia agent-config id for fix sessions.",
+      "default": "devin"
+    },
+    "agent_mode": {
+      "type": "string",
+      "description": "ACP session mode applied after create (session/set_mode). REQUIRED for unattended runs — devin's default accept-edits prompts on exec and deadlocks. 'bypass' auto-approves all tools; 'smart' auto-runs model-judged-safe actions; 'accept-edits' only auto-approves edits.",
+      "default": "bypass"
+    },
+    "max_agent_attempts": {
+      "type": "integer",
+      "description": "Per-PR cap on agent heal attempts — counted in <worktree_base>/attempts/pr-<n>, durable across restarts.",
+      "default": 3
+    },
+    "ci_check_name": {
+      "type": "string",
+      "description": "check_run.name the campaign reacts to (the CI job name).",
+      "default": "ci"
+    },
+    "default_branch": {
+      "type": "string",
+      "description": "Default branch — only pushes to it enqueue ci-jobs; PR branches are covered by pull_request events.",
+      "default": "main"
+    },
+    "lasius_root": {
+      "type": "string",
+      "description": "lasius workspace root (--root flag); repo args are checkout paths so any lasius.toml workspace works.",
+      "default": "/home/luis/GitHub/9aia/workspace"
+    }
+  },
+  "additionalProperties": true
+}

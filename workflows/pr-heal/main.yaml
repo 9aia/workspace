@@ -1,0 +1,578 @@
+# pr-heal — CI failure → sepia agent fix → push → green check →
+# campaign-driven merge (PL-015, validated e2e in the pr-heal-spike
+# repo: PR #3 healed by a devin session and squash-merged by the
+# campaign).
+#
+# Boundaries: lasius owns every git/forge call, sepia owns the agent
+# session (via the node's POST /api/sessions/run), peregrin owns only
+# event routing. No raw git/gh/devin anywhere in this file.
+#
+# Flow (two CI dialects, one downstream):
+#   check_run(completed) | status(ci/bupha) ──route──► green.<sha> ──►
+#   merge (verify PR head == sha, squash+delete-branch via lasius forge)
+#                          └──► failed.<sha> ──► worktree@sha
+#                               (detached; PR lookup is the gate) ──►
+#                               attempt ledger (per-PR cap) ──►
+#                               sepia run (fix, no commit) ──►
+#                               commit + push HEAD:pr-branch ──►
+#                               cleanup worktree ──►
+#                               (CI re-runs → next status/check_run)
+#   pull_request(closed) ──► cleanup worktree for the dead head sha
+#
+# Data flow: the sha rides the emitted event TYPE (`*.{sha}` →
+# `${event.match.1}`); every node re-derives what it needs (PR lookup,
+# worktree path is deterministic per sha). The Rust engine has no
+# stdout→state channel, so nothing here relies on `${state.*}`.
+# Attempt bounding is a per-PR counter file under worktree_base —
+# survives campaign restarts, scoped to the PR number.
+name: pr-heal
+
+annotations:
+  title: PR heal — CI fail to agent fix to merge
+  description: >-
+    React to GitHub check_run completions: heal failures with a sepia
+    agent session in a lasius worktree, merge on verified green.
+  author: 9aia
+  tags: [pr-heal, ci, agent, workflow]
+  since: "0.1.0"
+
+# Operator-facing knobs (see params.schema.json + README.md). The two
+# deployment-specific values — `repo` and `webhook_secret_env` — MUST
+# be set per watched repository before install.
+config:
+  # Watched repo as owner/name — drives the webhook repo filter, the
+  # status-event repo check, and docs. REQUIRED per deployment.
+  repo: ""
+  # Env var holding this repo's webhook HMAC secret — the
+  # BUPHA_WH_<OWNER>_<REPO> convention (uppercased, - → _). REQUIRED.
+  webhook_secret_env: ""
+  # Base URL of `peregrin serve` — sessions + entity plane. The agent
+  # step POSTs /api/sessions/run here; bearer = PEREGRIN_TOKEN.
+  node_url: "http://127.0.0.1:18787"
+  # Local clone lasius operates on (any checkout path — not required
+  # to live inside a lasius workspace). REQUIRED per deployment.
+  checkout: ""
+  # Detached heal worktrees + the per-PR attempt ledger land here.
+  worktree_base: "$HOME/.local/share/pr-heal/worktrees"
+  # sepia agent id for fix sessions (agent-config name, e.g. devin).
+  agent: "devin"
+  # Agent session mode applied via ACP session/set_mode after create —
+  # REQUIRED for unattended runs: devin's default accept-edits prompts
+  # on exec and nothing answers, deadlocking the turn. "bypass"
+  # auto-approves everything (fine inside a disposable worktree);
+  # "smart" is the safer middle ground.
+  agent_mode: "bypass"
+  # Per-PR cap on agent heal attempts — counted in
+  # <worktree_base>/attempts/pr-<n>, survives restarts.
+  max_agent_attempts: 3
+  # The GHA job name the campaign reacts to (check_run.name).
+  ci_check_name: "ci"
+  # Default branch — push events on other refs never enqueue ci-jobs
+  # (PR branches are covered by pull_request deliveries).
+  default_branch: "main"
+  # lasius workspace root (--root) — repo args are checkout paths,
+  # so any lasius.toml workspace works; the org workspace is the
+  # natural choice.
+  lasius_root: "/home/luis/GitHub/9aia/workspace"
+
+# Secret NAMES only — values live in ~/.config/peregrin/env (or cuora).
+# PEREGRIN_TOKEN always; the webhook HMAC env var named by
+# config.webhook_secret_env must ALSO be present (declared here under
+# its conventional name is not possible — it is per-deployment, so the
+# operator adds it to this list when wiring a repo).
+capabilities:
+  secrets:
+    - PEREGRIN_TOKEN
+
+# No supersede: push and pull_request deliveries for the same commit
+# share (repo, sha) — keying on that would cancel the ci-job enqueue.
+# Stale-sha heals die honestly downstream instead: the push node's
+# PR-head lookup finds no open PR for a superseded sha, and merge
+# only fires for the sha that is actually the PR head.
+
+nodes:
+# --- ingress: verified deliveries for the watched repo -----------------
+- id: pr-heal.ingress
+  driver: github-webhook
+  on:
+  - start
+  emits:
+  - pr-heal.ingress.listening
+  - push
+  - pull_request
+  - check_run
+  - check_suite
+  - status
+  params:
+    # Under `campaign serve` the daemon's --listen/--path govern the
+    # ONE shared socket — these are ignored there.
+    listen: 127.0.0.1:29173
+    path: /hook
+    repos:
+    - name: "${config.repo}"
+      secret_env: "${config.webhook_secret_env}"
+    # Only completed check_runs route — pending/in_progress deliveries
+    # are dropped at the door.
+    check_run_actions: [completed]
+    # PR lifecycle: new heads, updates, AND closes — `closed` feeds the
+    # cleanup node (dead head shas leave worktrees behind otherwise).
+    pull_request_actions: [opened, synchronize, reopened, closed]
+
+# --- push gate: only default-branch pushes enqueue a ci-job ------------
+# The bupha worker gates entity jobs on `ref == fleet.branch`. A push
+# to a PR branch would win the deterministic entity-id race against
+# the pull_request delivery and strand a pending job the worker never
+# claims — so non-default pushes are ignored here; PR branches are
+# covered by the pull_request event.
+- id: pr-heal.push.gate
+  driver: shell
+  on:
+  - push
+  emits:
+  - pr-heal.ci.push
+  - pr-heal.push.ignored
+  max_fires: unlimited
+  params:
+    cmd: |
+      set -u
+      [ '${event.payload.ref}' = 'refs/heads/${config.default_branch}' ] || { echo "ignore: ref='${event.payload.ref}'"; exit 2; }
+    emit:
+      '0': pr-heal.ci.push
+      default: pr-heal.push.ignored
+    timeout: 15
+
+# --- pr gate: pull_request → ci enqueue (open actions) or cleanup ------
+# `closed` must NOT enqueue CI — it routes to worktree cleanup for the
+# dead head sha instead.
+- id: pr-heal.pr.gate
+  driver: shell
+  on:
+  - pull_request
+  emits:
+  - pr-heal.ci.pr
+  - pr-heal.pr.closed
+  max_fires: unlimited
+  params:
+    cmd: |
+      set -u
+      if [ '${event.payload.action}' = 'closed' ]; then
+        echo "pr closed — cleanup path"
+        exit 1
+      fi
+    emit:
+      '0': pr-heal.ci.pr
+      default: pr-heal.pr.closed
+    timeout: 15
+
+# --- enqueue: push/pull_request → ci-job entity (bupha worker) ---------
+# Same contract as libraries/ci-ingress: create IS ci.enqueue; the
+# deterministic entity id dedups replays. The bupha worker claims the
+# job, runs the repo's CI script in a detached worktree, and posts a
+# commit status — which arrives back here as a `status` webhook event
+# (routed below). PR jobs run the head sha but gate on the base ref
+# (bupha's pull_request convention).
+- id: pr-heal.ci.enqueue.push
+  driver: http
+  on:
+  - pr-heal.ci.push
+  max_fires: unlimited
+  emits:
+  - http.done
+  - http.failed
+  params:
+    url: "${config.node_url}/api/entities"
+    method: POST
+    timeout: 30
+    retries: 3
+    headers:
+      authorization: "Bearer ${secret.PEREGRIN_TOKEN}"
+      content-type: application/json
+    body:
+      kind: ci-job
+      indexDoc:
+        key: "${event.payload.repo}"
+        repo: "${event.payload.repo}"
+        ref: "${event.payload.ref}"
+        sha: "${event.payload.sha}"
+        event: push
+        sender: "${event.payload.actor}"
+        deliveryId: "${event.payload.delivery_id}"
+        queue: "latest"
+        context: "ci/bupha"
+
+- id: pr-heal.ci.enqueue.pr
+  driver: http
+  on:
+  - pr-heal.ci.pr
+  max_fires: unlimited
+  emits:
+  - http.done
+  - http.failed
+  params:
+    url: "${config.node_url}/api/entities"
+    method: POST
+    timeout: 30
+    retries: 3
+    headers:
+      authorization: "Bearer ${secret.PEREGRIN_TOKEN}"
+      content-type: application/json
+    body:
+      kind: ci-job
+      indexDoc:
+        key: "${event.payload.repo}"
+        repo: "${event.payload.repo}"
+        ref: "refs/heads/${event.payload.base_ref}"
+        sha: "${event.payload.sha}"
+        event: pull_request
+        sender: "${event.payload.actor}"
+        deliveryId: "${event.payload.delivery_id}"
+        queue: "latest"
+        context: "ci/bupha"
+
+# --- route: check_run|status → green.<sha> | failed.<sha> | ignored ----
+# Two CI dialects feed the same downstream: GHA `check_run`
+# (name/app/conclusion/pull_requests) and bupha `status` commit
+# statuses (context/state). Both emit `*.{sha}` so the heal/merge
+# chain is dialect-agnostic.
+- id: pr-heal.route
+  driver: shell
+  on:
+  - check_run
+  - status
+  emits:
+  - pr-heal.check.green.*
+  - pr-heal.check.failed.*
+  - pr-heal.check.ignored
+  max_fires: unlimited
+  params:
+    cmd: |
+      set -u
+      TYPE='${event.type}'
+      if [ "$TYPE" = "status" ]; then
+        # bupha commit status — repo/context filters + state verdict.
+        CONTEXT='${event.payload.context}'
+        STATE='${event.payload.state}'
+        [ "${event.payload.repo}" = "${config.repo}" ] || { echo "ignore: repo"; exit 2; }
+        case "$CONTEXT" in
+          ci/bupha|ci/bupha/*) ;;
+          *) echo "ignore: context='$CONTEXT'"; exit 2 ;;
+        esac
+        case "$STATE" in
+          success) exit 0 ;;
+          failure|error) exit 1 ;;
+          *) echo "ignore: state='$STATE'"; exit 2 ;;
+        esac
+      fi
+      NAME='${event.payload.name}'
+      APP='${event.payload.app}'
+      CONCLUSION='${event.payload.conclusion}'
+      PRS='${event.payload.pull_requests}'
+      [ "$NAME" = "${config.ci_check_name}" ] || { echo "ignore: check name='$NAME'"; exit 2; }
+      [ "$APP" = "github-actions" ] || { echo "ignore: app='$APP'"; exit 2; }
+      case "$PRS" in ""|"[]"|"null") echo "ignore: no pull_requests"; exit 2 ;; esac
+      case "$CONCLUSION" in
+        success) exit 0 ;;
+        failure|cancelled|timed_out|action_required|startup_failure|stale) exit 1 ;;
+        *) echo "ignore: conclusion='$CONCLUSION'"; exit 2 ;;
+      esac
+    emit:
+      '0': "pr-heal.check.green.${event.payload.sha}"
+      '1': "pr-heal.check.failed.${event.payload.sha}"
+      default: pr-heal.check.ignored
+    timeout: 30
+
+# --- merge: verified green → squash-merge via lasius forge -------------
+# Safety: resolve the open PR whose head_sha IS the checked sha, then
+# merge. A green check on a stale sha finds no PR → skipped; a head
+# that moved after the green check also finds no PR → skipped (the
+# merge only ever fires for the exact verified sha).
+- id: pr-heal.merge
+  driver: shell
+  on:
+  - pr-heal.check.green.*
+  emits:
+  - pr-heal.merged.*
+  - pr-heal.merge.skipped.*
+  - pr-heal.merge.failed.*
+  max_fires: unlimited
+  params:
+    cmd: |
+      set -euo pipefail
+      SHA='${event.match.1}'
+      JSON=$(lasius --root "${config.lasius_root}" forge pr list "${config.checkout}" --state open --json)
+      NUMBER=$(printf '%s' "$JSON" | jq -r --arg sha "$SHA" '[.[] | select(.head_sha == $sha)] | .[0].number // empty')
+      if [ -z "$NUMBER" ]; then
+        echo "skip: no open PR with head_sha=$SHA"
+        exit 3
+      fi
+      echo "merging PR #$NUMBER (head $SHA)"
+      lasius --root "${config.lasius_root}" forge pr merge "${config.checkout}" "$NUMBER" --method squash --delete-branch --json
+    emit:
+      '0': "pr-heal.merged.${event.match.1}"
+      '3': "pr-heal.merge.skipped.${event.match.1}"
+      default: "pr-heal.merge.failed.${event.match.1}"
+    timeout: 120
+
+# --- heal: detached worktree at the PR head sha -------------------------
+# Stateless by design: the sha rides the event type (`*.{sha}`) and
+# every node re-derives what it needs (PR lookup, worktree path) — the
+# Rust engine has no stdout→state channel (`set_state_from_stdout` is
+# a TS-era param), so `${state.*}` would stay empty. Detached (no -b)
+# so repeat heals never collide on a local branch; push uses
+# HEAD:refs/heads/<pr-branch> instead. The PR lookup doubles as the
+# "is there anything to heal" gate.
+- id: pr-heal.worktree
+  driver: shell
+  on:
+  - pr-heal.check.failed.*
+  emits:
+  - pr-heal.worktree.ready.*
+  - pr-heal.worktree.failed.*
+  max_fires: unlimited
+  params:
+    cmd: |
+      set -euo pipefail
+      SHA='${event.match.1}'
+      WT="${config.worktree_base}/${SHA:0:12}"
+      JSON=$(lasius --root "${config.lasius_root}" forge pr list "${config.checkout}" --state open --json)
+      NUMBER=$(printf '%s' "$JSON" | jq -r --arg sha "$SHA" '[.[] | select(.head_sha == $sha)] | .[0].number // empty')
+      if [ -z "$NUMBER" ]; then
+        echo "no open PR with head_sha=$SHA — nothing to heal"
+        exit 1
+      fi
+      mkdir -p "${config.worktree_base}"
+      lasius --root "${config.lasius_root}" vcs fetch "${config.checkout}" --json >/dev/null
+      lasius --root "${config.lasius_root}" vcs worktree remove "${config.checkout}" --dir "$WT" --json >/dev/null 2>&1 || true
+      lasius --root "${config.lasius_root}" vcs worktree add "${config.checkout}" --dir "$WT" --rev "$SHA" --json >/dev/null
+      echo "worktree_path=$WT"
+      echo "pr_number=$NUMBER"
+      echo "head_sha=$SHA"
+    emit:
+      '0': "pr-heal.worktree.ready.${event.match.1}"
+      default: "pr-heal.worktree.failed.${event.match.1}"
+    timeout: 120
+
+# --- heal: per-PR attempt ledger ----------------------------------------
+# Counts agent attempts per PR number in <worktree_base>/attempts/ —
+# durable across campaign restarts and scoped per PR (unlike a node-
+# global max_fires). Over cap → gaveup.<sha>, reported terminally; the
+# PR is left for a human.
+- id: pr-heal.attempts
+  driver: shell
+  on:
+  - pr-heal.worktree.ready.*
+  emits:
+  - pr-heal.attempts.ok.*
+  - pr-heal.attempts.gaveup.*
+  - pr-heal.attempts.failed.*
+  max_fires: unlimited
+  params:
+    cmd: |
+      set -euo pipefail
+      SHA='${event.match.1}'
+      JSON=$(lasius --root "${config.lasius_root}" forge pr list "${config.checkout}" --state open --json)
+      NUMBER=$(printf '%s' "$JSON" | jq -r --arg sha "$SHA" '[.[] | select(.head_sha == $sha)] | .[0].number // empty')
+      if [ -z "$NUMBER" ]; then
+        echo "no open PR with head_sha=$SHA — nothing to heal"
+        exit 1
+      fi
+      DIR="${config.worktree_base}/attempts"
+      FILE="$DIR/pr-$NUMBER"
+      mkdir -p "$DIR"
+      COUNT=$(( $(cat "$FILE" 2>/dev/null || echo 0) + 1 ))
+      echo "$COUNT" > "$FILE"
+      if [ "$COUNT" -gt "${config.max_agent_attempts}" ]; then
+        echo "pr #$NUMBER attempt $COUNT exceeds cap ${config.max_agent_attempts} — giving up"
+        exit 3
+      fi
+      echo "pr #$NUMBER attempt $COUNT/${config.max_agent_attempts}"
+    emit:
+      '0': "pr-heal.attempts.ok.${event.match.1}"
+      '3': "pr-heal.attempts.gaveup.${event.match.1}"
+      default: "pr-heal.attempts.failed.${event.match.1}"
+    timeout: 60
+
+# --- heal: sepia agent session — fix, do not commit ---------------------
+# POST /api/sessions/run on the node: create session + blocking
+# prompt_wait in one call. shell+curl (not driver:http) so the emitted
+# event can carry the sha — and so the bearer token rides curl's
+# --config stdin instead of `ps` argv. `mode` is REQUIRED: devin's
+# default prompts on exec and an unattended turn deadlocks.
+- id: pr-heal.agent
+  driver: shell
+  on:
+  - pr-heal.attempts.ok.*
+  emits:
+  - pr-heal.agent.done.*
+  - pr-heal.agent.failed.*
+  # Per-PR attempt cap lives in pr-heal.attempts (durable ledger);
+  # max_fires stays as a campaign-lifetime circuit breaker only.
+  max_fires: 50
+  retry:
+    max_attempts: 3
+    delay: 5000
+    backoff: fixed
+  params:
+    env:
+      PRHEAL_TOKEN: "${secret.PEREGRIN_TOKEN}"
+    cmd: |
+      set -euo pipefail
+      SHA='${event.match.1}'
+      WT="${config.worktree_base}/${SHA:0:12}"
+      # Both CI dialects can emit failed.<sha> for the same sha
+      # (check_run + status) — the per-sha lock keeps a second fire
+      # from starting a parallel agent on the same worktree. Held only
+      # for the duration of the call: a failed attempt releases it so
+      # `retry` can reacquire.
+      LOCK="${config.worktree_base}/${SHA:0:12}.agent-lock"
+      if ! mkdir "$LOCK" 2>/dev/null; then
+        echo "heal already in flight for $SHA"
+        exit 1
+      fi
+      trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+      BODY=$(jq -n \
+        --arg cwd "$WT" \
+        --arg sha "$SHA" \
+        --arg agent "${config.agent}" \
+        --arg mode "${config.agent_mode}" \
+        --argjson timeout 1800000 \
+        '{cwd:$cwd, agent:$agent, mode:$mode, timeoutMs:$timeout, text:(
+          "CI check \u0027${config.ci_check_name}\u0027 failed on commit \($sha) in this repository.\n\n" +
+          "1. Run the repository's CI check to reproduce the failure.\n" +
+          "2. Diagnose and fix the root cause so the check passes.\n" +
+          "3. Verify the check exits 0.\n\n" +
+          "Do NOT commit, push, or open a PR — leave the changes in the working tree."
+        )}')
+      # Bearer via curl --config on stdin: keeps the token out of `ps`
+      # argv (a literal -H "Bearer $TOKEN" would expose it; curl's
+      # --variable {{name}} expansion does not apply to -H headers).
+      RESP=$(printf 'header = "authorization: Bearer %s"\n' "$PRHEAL_TOKEN" |
+        curl -sf --max-time 1900 --config - \
+        -X POST "${config.node_url}/api/sessions/run" \
+        -H 'content-type: application/json' -d "$BODY")
+      echo "$RESP" | jq .
+      printf '%s' "$RESP" | jq -e '(.stopReason == "end_turn" or .stopReason == "cancelled") and (.timedOut != true)' >/dev/null
+    emit:
+      '0': "pr-heal.agent.done.${event.match.1}"
+      default: "pr-heal.agent.failed.${event.match.1}"
+    timeout: 2000
+
+# --- heal: commit + push HEAD to the PR head branch ---------------------
+- id: pr-heal.push
+  driver: shell
+  on:
+  - pr-heal.agent.done.*
+  emits:
+  - pr-heal.pushed.*
+  - pr-heal.push.failed.*
+  max_fires: unlimited
+  params:
+    cmd: |
+      set -euo pipefail
+      SHA='${event.match.1}'
+      WT="${config.worktree_base}/${SHA:0:12}"
+      JSON=$(lasius --root "${config.lasius_root}" forge pr list "${config.checkout}" --state open --json)
+      BRANCH=$(printf '%s' "$JSON" | jq -r --arg sha "$SHA" '[.[] | select(.head_sha == $sha)] | .[0].head_ref // empty')
+      if [ -z "$BRANCH" ]; then
+        echo "no open PR with head_sha=$SHA — cannot name push branch"
+        exit 1
+      fi
+      # No --allow-empty: an agent that produced no diff fails the
+      # commit honestly instead of retriggering CI in a loop.
+      lasius --root "${config.lasius_root}" vcs commit "$WT" -m "fix: resolve CI failure (pr-heal)" --json
+      lasius --root "${config.lasius_root}" vcs push "$WT" --branch "HEAD:refs/heads/$BRANCH" --json
+    emit:
+      '0': "pr-heal.pushed.${event.match.1}"
+      default: "pr-heal.push.failed.${event.match.1}"
+    timeout: 120
+
+# --- cleanup: worktree + lock after a successful push -------------------
+# The fix is on the PR branch now — the detached worktree has done its
+# job. Failure paths keep the worktree for debugging (documented manual
+# gc in README); PR-close and terminal gives-ups clean theirs.
+- id: pr-heal.cleanup.pushed
+  driver: shell
+  on:
+  - pr-heal.pushed.*
+  emits:
+  - pr-heal.cleaned.*
+  max_fires: unlimited
+  params:
+    cmd: |
+      set -uo pipefail
+      SHA='${event.match.1}'
+      WT="${config.worktree_base}/${SHA:0:12}"
+      lasius --root "${config.lasius_root}" vcs worktree remove "${config.checkout}" --dir "$WT" --json >/dev/null 2>&1 || true
+      rmdir "${config.worktree_base}/${SHA:0:12}.agent-lock" 2>/dev/null || true
+      echo "cleaned $WT"
+    emit:
+      '0': "pr-heal.cleaned.${event.match.1}"
+    timeout: 60
+
+# --- cleanup: PR closed (merged elsewhere or abandoned) -----------------
+# pull_request(closed) carries the dead head sha — drop its worktree
+# and lock so stale shas never accumulate.
+- id: pr-heal.cleanup.closed
+  driver: shell
+  on:
+  - pr-heal.pr.closed
+  emits:
+  - pr-heal.cleaned.*
+  max_fires: unlimited
+  params:
+    cmd: |
+      set -uo pipefail
+      SHA='${event.payload.sha}'
+      WT="${config.worktree_base}/${SHA:0:12}"
+      lasius --root "${config.lasius_root}" vcs worktree remove "${config.checkout}" --dir "$WT" --json >/dev/null 2>&1 || true
+      rmdir "${config.worktree_base}/${SHA:0:12}.agent-lock" 2>/dev/null || true
+      echo "cleaned $WT (pr closed)"
+    emit:
+      '0': "pr-heal.cleaned.${event.payload.sha}"
+    timeout: 60
+
+# --- cleanup: gave up — worktree stays for human inspection -------------
+# Attempt-cap gives-up KEEPS the worktree + lock removed only: the
+# agent-lock is stale by definition (no agent running), the worktree
+# is the debugging surface.
+- id: pr-heal.cleanup.gaveup
+  driver: shell
+  on:
+  - pr-heal.attempts.gaveup.*
+  emits:
+  - pr-heal.cleaned.*
+  max_fires: unlimited
+  params:
+    cmd: |
+      set -uo pipefail
+      SHA='${event.match.1}'
+      rmdir "${config.worktree_base}/${SHA:0:12}.agent-lock" 2>/dev/null || true
+      echo "gaveup cleanup for ${SHA:0:12} (worktree kept for inspection)"
+    emit:
+      '0': "pr-heal.cleaned.${event.match.1}"
+    timeout: 30
+
+# --- terminal reporting --------------------------------------------------
+- id: pr-heal.report
+  driver: shell
+  on:
+  - pr-heal.merged.*
+  - pr-heal.merge.skipped.*
+  - pr-heal.merge.failed.*
+  - pr-heal.pushed.*
+  - pr-heal.agent.done.*
+  - pr-heal.agent.failed.*
+  - pr-heal.attempts.gaveup.*
+  - pr-heal.attempts.failed.*
+  - pr-heal.worktree.failed.*
+  - pr-heal.push.failed.*
+  - pr-heal.cleaned.*
+  - node.exhausted
+  emits:
+  - pr-heal.report.done
+  params:
+    cmd: |
+      echo "pr-heal terminal: ${event.type} sha=${event.match.1:-${event.payload.sha:-?}}"
+    emit:
+      '0': pr-heal.report.done
+    timeout: 30
