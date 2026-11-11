@@ -17,7 +17,12 @@
 #                               commit + push HEAD:pr-branch ──►
 #                               cleanup worktree ──►
 #                               (CI re-runs → next status/check_run)
-#   pull_request(closed) ──► cleanup worktree for the dead head sha
+#
+# Ingress filtering lives in the webhook driver, NOT shell gates:
+# `push_refs` drops non-default-branch pushes at the door (a shell
+# gate's emitted event carries only {stdout,rc,cmd} — the payload the
+# enqueue node needs would be lost), and `pull_request_actions` limits
+# PR deliveries to open/update actions.
 #
 # Data flow: the sha rides the emitted event TYPE (`*.{sha}` →
 # `${event.match.1}`); every node re-derives what it needs (PR lookup,
@@ -114,55 +119,16 @@ nodes:
     # Only completed check_runs route — pending/in_progress deliveries
     # are dropped at the door.
     check_run_actions: [completed]
-    # PR lifecycle: new heads, updates, AND closes — `closed` feeds the
-    # cleanup node (dead head shas leave worktrees behind otherwise).
-    pull_request_actions: [opened, synchronize, reopened, closed]
-
-# --- push gate: only default-branch pushes enqueue a ci-job ------------
-# The bupha worker gates entity jobs on `ref == fleet.branch`. A push
-# to a PR branch would win the deterministic entity-id race against
-# the pull_request delivery and strand a pending job the worker never
-# claims — so non-default pushes are ignored here; PR branches are
-# covered by the pull_request event.
-- id: pr-heal.push.gate
-  driver: shell
-  on:
-  - push
-  emits:
-  - pr-heal.ci.push
-  - pr-heal.push.ignored
-  max_fires: unlimited
-  params:
-    cmd: |
-      set -u
-      [ '${event.payload.ref}' = 'refs/heads/${config.default_branch}' ] || { echo "ignore: ref='${event.payload.ref}'"; exit 2; }
-    emit:
-      '0': pr-heal.ci.push
-      default: pr-heal.push.ignored
-    timeout: 15
-
-# --- pr gate: pull_request → ci enqueue (open actions) or cleanup ------
-# `closed` must NOT enqueue CI — it routes to worktree cleanup for the
-# dead head sha instead.
-- id: pr-heal.pr.gate
-  driver: shell
-  on:
-  - pull_request
-  emits:
-  - pr-heal.ci.pr
-  - pr-heal.pr.closed
-  max_fires: unlimited
-  params:
-    cmd: |
-      set -u
-      if [ '${event.payload.action}' = 'closed' ]; then
-        echo "pr closed — cleanup path"
-        exit 1
-      fi
-    emit:
-      '0': pr-heal.ci.pr
-      default: pr-heal.pr.closed
-    timeout: 15
+    # PR lifecycle we CI: new heads and updates; closed/merged would
+    # enqueue jobs for already-dead refs.
+    pull_request_actions: [opened, synchronize, reopened]
+    # Only default-branch pushes enqueue a ci-job — the bupha worker
+    # gates entity jobs on `ref == fleet.branch`, and a PR-branch push
+    # winning the deterministic entity-id race against the
+    # pull_request delivery would strand a job the worker never
+    # claims. Filtering here (not a shell gate) keeps the push
+    # payload intact for the enqueue node.
+    push_refs: ["refs/heads/${config.default_branch}"]
 
 # --- enqueue: push/pull_request → ci-job entity (bupha worker) ---------
 # Same contract as libraries/ci-ingress: create IS ci.enqueue; the
@@ -174,7 +140,7 @@ nodes:
 - id: pr-heal.ci.enqueue.push
   driver: http
   on:
-  - pr-heal.ci.push
+  - push
   max_fires: unlimited
   emits:
   - http.done
@@ -203,7 +169,7 @@ nodes:
 - id: pr-heal.ci.enqueue.pr
   driver: http
   on:
-  - pr-heal.ci.pr
+  - pull_request
   max_fires: unlimited
   emits:
   - http.done
@@ -507,28 +473,6 @@ nodes:
       echo "cleaned $WT"
     emit:
       '0': "pr-heal.cleaned.${event.match.1}"
-    timeout: 60
-
-# --- cleanup: PR closed (merged elsewhere or abandoned) -----------------
-# pull_request(closed) carries the dead head sha — drop its worktree
-# and lock so stale shas never accumulate.
-- id: pr-heal.cleanup.closed
-  driver: shell
-  on:
-  - pr-heal.pr.closed
-  emits:
-  - pr-heal.cleaned.*
-  max_fires: unlimited
-  params:
-    cmd: |
-      set -uo pipefail
-      SHA='${event.payload.sha}'
-      WT="${config.worktree_base}/${SHA:0:12}"
-      lasius --root "${config.lasius_root}" vcs worktree remove "${config.checkout}" --dir "$WT" --json >/dev/null 2>&1 || true
-      rmdir "${config.worktree_base}/${SHA:0:12}.agent-lock" 2>/dev/null || true
-      echo "cleaned $WT (pr closed)"
-    emit:
-      '0': "pr-heal.cleaned.${event.payload.sha}"
     timeout: 60
 
 # --- cleanup: gave up — worktree stays for human inspection -------------

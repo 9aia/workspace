@@ -8,7 +8,7 @@
 # session (POST /api/sessions/run → sessions.prompt_wait), peregrin
 # owns only event routing, bupha runs the CI job, tamias distributes.
 name: pr-heal
-version: "0.1.0"
+version: "0.2.0"
 type: peregrin-bundle
 description: >-
   CI failure → sepia agent fix → push → verified green check →
