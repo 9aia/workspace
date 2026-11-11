@@ -43,6 +43,11 @@
       "description": "Per-PR cap on agent heal attempts — counted in <worktree_base>/attempts/pr-<n>, durable across restarts.",
       "default": 3
     },
+    "max_conflict_attempts": {
+      "type": "integer",
+      "description": "Per-PR cap on merge-conflict resolution attempts — counted in <worktree_base>/attempts/pr-<n>-conflicts, durable across restarts. Over-cap emits conflict.attempts.gaveup and leaves the PR for a human.",
+      "default": 2
+    },
     "ci_check_name": {
       "type": "string",
       "description": "check_run.name the campaign reacts to (the CI job name).",

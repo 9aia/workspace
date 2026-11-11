@@ -10,7 +10,17 @@
 # Flow (two CI dialects, one downstream):
 #   check_run(completed) | status(ci/bupha) ──route──► green.<sha> ──►
 #   merge (verify PR head == sha, squash+delete-branch via lasius forge)
-#                          └──► failed.<sha> ──► worktree@sha
+#                          ├──► merged.<sha> / skipped.<sha> (report)
+#                          ├──► failed.<sha> (non-conflict — report)
+#                          └──► conflict.<sha> (unmergeable — mergeable/
+#                               merge_state DIRTY) ──► worktree@live-head
+#                               (PR number persisted by merge node) ──►
+#                               conflict attempt ledger (per-PR cap) ──►
+#                               sepia run (merge base, resolve, no
+#                               commit/push) ──► commit + push
+#                               HEAD:pr-branch ──► cleanup worktree ──►
+#                               (CI re-runs → next status/check_run)
+#   route also emits failed.<sha> (CI red) ──► worktree@sha
 #                               (detached; PR lookup is the gate) ──►
 #                               attempt ledger (per-PR cap) ──►
 #                               sepia run (fix, no commit) ──►
@@ -70,6 +80,9 @@ config:
   # Per-PR cap on agent heal attempts — counted in
   # <worktree_base>/attempts/pr-<n>, survives restarts.
   max_agent_attempts: 3
+  # Per-PR cap on conflict-resolution attempts — counted in
+  # <worktree_base>/attempts/pr-<n>-conflicts, survives restarts.
+  max_conflict_attempts: 2
   # The GHA job name the campaign reacts to (check_run.name).
   ci_check_name: "ci"
   # Default branch — push events on other refs never enqueue ci-jobs
@@ -252,6 +265,14 @@ nodes:
 # merge. A green check on a stale sha finds no PR → skipped; a head
 # that moved after the green check also finds no PR → skipped (the
 # merge only ever fires for the exact verified sha).
+#
+# On merge failure the node classifies the cause: `lasius forge pr
+# view --json` exposes `mergeable`/`merge_state` (gh's
+# mergeable/mergeStateStatus — CONFLICTING/DIRTY mean the PR can't
+# merge cleanly). A conflict routes to the conflict-heal chain below;
+# anything else stays a terminal `merge.failed` report. The PR number
+# is persisted under <worktree_base>/conflicts/<sha> so the chain can
+# re-resolve the live head even if it moves after this event.
 - id: pr-heal.merge
   driver: shell
   on:
@@ -260,22 +281,50 @@ nodes:
   - pr-heal.merged.*
   - pr-heal.merge.skipped.*
   - pr-heal.merge.failed.*
+  - pr-heal.merge.conflict.*
   max_fires: unlimited
   params:
     cmd: |
-      set -euo pipefail
+      set -uo pipefail
       SHA='${event.match.1}'
-      JSON=$(lasius --root "${config.lasius_root}" forge pr list "${config.checkout}" --state open --json)
+      JSON=$(lasius --root "${config.lasius_root}" forge pr list "${config.checkout}" --state open --json) || exit 1
       NUMBER=$(printf '%s' "$JSON" | jq -r --arg sha "$SHA" '[.[] | select(.head_sha == $sha)] | .[0].number // empty')
       if [ -z "$NUMBER" ]; then
         echo "skip: no open PR with head_sha=$SHA"
         exit 3
       fi
       echo "merging PR #$NUMBER (head $SHA)"
-      lasius --root "${config.lasius_root}" forge pr merge "${config.checkout}" "$NUMBER" --method squash --delete-branch --json
+      if OUT=$(lasius --root "${config.lasius_root}" forge pr merge "${config.checkout}" "$NUMBER" --method squash --delete-branch --json 2>&1); then
+        printf '%s\n' "$OUT"
+        exit 0
+      fi
+      echo "merge failed: $OUT"
+      # No `set -e` above — the merge failure is the signal we classify.
+      VIEW=$(lasius --root "${config.lasius_root}" forge pr view "${config.checkout}" "$NUMBER" --json 2>/dev/null) || exit 1
+      MERGEABLE=$(printf '%s' "$VIEW" | jq -r '.mergeable // empty')
+      MSTATE=$(printf '%s' "$VIEW" | jq -r '.merge_state // empty')
+      CONFLICT=0
+      case "$MERGEABLE" in CONFLICTING) CONFLICT=1 ;; esac
+      if [ "$MSTATE" = "DIRTY" ]; then CONFLICT=1; fi
+      if [ "$CONFLICT" -eq 0 ]; then
+        # Backend may report UNKNOWN transiently — fall back to the
+        # merge command's own diagnostics.
+        case "$OUT" in
+          *conflict*|*CONFLICT*|*"not mergeable"*) CONFLICT=1 ;;
+        esac
+      fi
+      if [ "$CONFLICT" -eq 1 ]; then
+        mkdir -p "${config.worktree_base}/conflicts"
+        echo "$NUMBER" > "${config.worktree_base}/conflicts/${SHA}"
+        echo "PR #$NUMBER unmergeable (mergeable=$MERGEABLE merge_state=$MSTATE) — routing to conflict resolution"
+        exit 4
+      fi
+      echo "merge failed without a conflict signal (mergeable=$MERGEABLE merge_state=$MSTATE)"
+      exit 1
     emit:
       '0': "pr-heal.merged.${event.match.1}"
       '3': "pr-heal.merge.skipped.${event.match.1}"
+      '4': "pr-heal.merge.conflict.${event.match.1}"
       default: "pr-heal.merge.failed.${event.match.1}"
     timeout: 120
 
@@ -496,6 +545,248 @@ nodes:
       '0': "pr-heal.cleaned.${event.match.1}"
     timeout: 30
 
+# --- conflict heal: merge.conflict → worktree at the LIVE head ---------
+# Mirrors pr-heal.worktree, but the checkout rev is the PR's CURRENT
+# head (re-resolved via `pr view`), not the event sha — the head may
+# have moved between the failed merge and this node firing. The
+# worktree dir stays keyed on the event sha so every downstream node
+# derives the same path; the merge node persisted the PR number in
+# <worktree_base>/conflicts/<sha> (head_sha list-match is the
+# fallback). Detached HEAD: the agent merges the base branch in and
+# leaves the resolution uncommitted.
+- id: pr-heal.conflict.worktree
+  driver: shell
+  on:
+  - pr-heal.merge.conflict.*
+  emits:
+  - pr-heal.conflict.worktree.ready.*
+  - pr-heal.conflict.worktree.failed.*
+  max_fires: unlimited
+  params:
+    cmd: |
+      set -euo pipefail
+      SHA='${event.match.1}'
+      NUMBER=""
+      NUMFILE="${config.worktree_base}/conflicts/${SHA}"
+      if [ -f "$NUMFILE" ]; then NUMBER=$(cat "$NUMFILE"); fi
+      if [ -z "$NUMBER" ]; then
+        JSON=$(lasius --root "${config.lasius_root}" forge pr list "${config.checkout}" --state open --json)
+        NUMBER=$(printf '%s' "$JSON" | jq -r --arg sha "$SHA" '[.[] | select(.head_sha == $sha)] | .[0].number // empty')
+      fi
+      if [ -z "$NUMBER" ]; then
+        echo "no PR recorded/found for conflicted sha $SHA"
+        exit 1
+      fi
+      VIEW=$(lasius --root "${config.lasius_root}" forge pr view "${config.checkout}" "$NUMBER" --json)
+      LIVE=$(printf '%s' "$VIEW" | jq -r '.head_sha // empty')
+      LIVE="${LIVE:-$SHA}"
+      WT="${config.worktree_base}/${SHA:0:12}"
+      mkdir -p "${config.worktree_base}"
+      lasius --root "${config.lasius_root}" vcs fetch "${config.checkout}" --json >/dev/null
+      lasius --root "${config.lasius_root}" vcs worktree remove "${config.checkout}" --dir "$WT" --json >/dev/null 2>&1 || true
+      lasius --root "${config.lasius_root}" vcs worktree add "${config.checkout}" --dir "$WT" --rev "$LIVE" --json >/dev/null
+      echo "worktree_path=$WT"
+      echo "pr_number=$NUMBER"
+      echo "head_sha=$LIVE"
+    emit:
+      '0': "pr-heal.conflict.worktree.ready.${event.match.1}"
+      default: "pr-heal.conflict.worktree.failed.${event.match.1}"
+    timeout: 120
+
+# --- conflict heal: per-PR attempt ledger -------------------------------
+# Same durable-counter pattern as pr-heal.attempts, own file
+# (<worktree_base>/attempts/pr-<n>-conflicts) and own cap so heal and
+# conflict budgets don't share. Over cap → gaveup.<sha>, terminal.
+- id: pr-heal.conflict.attempts
+  driver: shell
+  on:
+  - pr-heal.conflict.worktree.ready.*
+  emits:
+  - pr-heal.conflict.attempts.ok.*
+  - pr-heal.conflict.attempts.gaveup.*
+  - pr-heal.conflict.attempts.failed.*
+  max_fires: unlimited
+  params:
+    cmd: |
+      set -euo pipefail
+      SHA='${event.match.1}'
+      NUMBER=""
+      NUMFILE="${config.worktree_base}/conflicts/${SHA}"
+      if [ -f "$NUMFILE" ]; then NUMBER=$(cat "$NUMFILE"); fi
+      if [ -z "$NUMBER" ]; then
+        JSON=$(lasius --root "${config.lasius_root}" forge pr list "${config.checkout}" --state open --json)
+        NUMBER=$(printf '%s' "$JSON" | jq -r --arg sha "$SHA" '[.[] | select(.head_sha == $sha)] | .[0].number // empty')
+      fi
+      if [ -z "$NUMBER" ]; then
+        echo "no PR recorded/found for conflicted sha $SHA"
+        exit 1
+      fi
+      DIR="${config.worktree_base}/attempts"
+      FILE="$DIR/pr-$NUMBER-conflicts"
+      mkdir -p "$DIR"
+      COUNT=$(( $(cat "$FILE" 2>/dev/null || echo 0) + 1 ))
+      echo "$COUNT" > "$FILE"
+      if [ "$COUNT" -gt "${config.max_conflict_attempts}" ]; then
+        echo "pr #$NUMBER conflict attempt $COUNT exceeds cap ${config.max_conflict_attempts} — giving up"
+        exit 3
+      fi
+      echo "pr #$NUMBER conflict attempt $COUNT/${config.max_conflict_attempts}"
+    emit:
+      '0': "pr-heal.conflict.attempts.ok.${event.match.1}"
+      '3': "pr-heal.conflict.attempts.gaveup.${event.match.1}"
+      default: "pr-heal.conflict.attempts.failed.${event.match.1}"
+    timeout: 60
+
+# --- conflict heal: sepia agent — merge base, resolve, no commit ------
+# Same /api/sessions/run pattern as pr-heal.agent (bearer via curl
+# --config stdin, mode required, per-sha lock). The agent is the hands:
+# it may run git inside the worktree — merge the base branch into HEAD,
+# resolve conflicts preserving the PR's intent, verify CI passes — but
+# leaves the result uncommitted. `lasius vcs commit` (git add -A +
+# git commit) then concludes the in-progress merge and pushes it.
+- id: pr-heal.conflict.agent
+  driver: shell
+  on:
+  - pr-heal.conflict.attempts.ok.*
+  emits:
+  - pr-heal.conflict.agent.done.*
+  - pr-heal.conflict.agent.failed.*
+  max_fires: 50
+  retry:
+    max_attempts: 3
+    delay: 5000
+    backoff: fixed
+  params:
+    env:
+      PRHEAL_TOKEN: "${secret.PEREGRIN_TOKEN}"
+    cmd: |
+      set -euo pipefail
+      SHA='${event.match.1}'
+      WT="${config.worktree_base}/${SHA:0:12}"
+      LOCK="${config.worktree_base}/${SHA:0:12}.agent-lock"
+      if ! mkdir "$LOCK" 2>/dev/null; then
+        echo "agent already in flight for $SHA"
+        exit 1
+      fi
+      trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+      # Best-effort base-branch name for the prompt.
+      BASE="the PR's base branch"
+      NUMBER=""
+      NUMFILE="${config.worktree_base}/conflicts/${SHA}"
+      if [ -f "$NUMFILE" ]; then NUMBER=$(cat "$NUMFILE"); fi
+      if [ -n "$NUMBER" ]; then
+        VIEW=$(lasius --root "${config.lasius_root}" forge pr view "${config.checkout}" "$NUMBER" --json 2>/dev/null || true)
+        B=$(printf '%s' "$VIEW" | jq -r '.base_ref // empty' 2>/dev/null || true)
+        if [ -n "$B" ]; then BASE="$B"; fi
+      fi
+      BODY=$(jq -n \
+        --arg cwd "$WT" \
+        --arg sha "$SHA" \
+        --arg base "$BASE" \
+        --arg agent "${config.agent}" \
+        --arg mode "${config.agent_mode}" \
+        --argjson timeout 1800000 \
+        '{cwd:$cwd, agent:$agent, mode:$mode, timeoutMs:$timeout, text:(
+          "This worktree holds the head of a pull request whose branch conflicts with its base branch \u0027\($base)\u0027 — the PR cannot be merged until the conflicts are resolved.\n\n" +
+          "1. Fetch and integrate the base branch into HEAD (merge \u0027\($base)\u0027 into the current HEAD — do NOT rebase), resolving every conflict so the PR\u0027s intent is preserved.\n" +
+          "2. Run the repository CI check and make it pass.\n" +
+          "3. Leave the resolution UNCOMMITTED in the working tree — do NOT commit, push, or open a PR; the campaign commits and pushes.\n\n" +
+          "If git leaves a merge in progress after you resolve the files, that is expected — leave MERGE_HEAD in place and the resolved files in the tree."
+        )}')
+      # Bearer via curl --config on stdin: keeps the token out of `ps`
+      # argv (same pattern as pr-heal.agent).
+      RESP=$(printf 'header = "authorization: Bearer %s"\n' "$PRHEAL_TOKEN" |
+        curl -sf --max-time 1900 --config - \
+        -X POST "${config.node_url}/api/sessions/run" \
+        -H 'content-type: application/json' -d "$BODY")
+      echo "$RESP" | jq .
+      printf '%s' "$RESP" | jq -e '(.stopReason == "end_turn" or .stopReason == "cancelled") and (.timedOut != true)' >/dev/null
+    emit:
+      '0': "pr-heal.conflict.agent.done.${event.match.1}"
+      default: "pr-heal.conflict.agent.failed.${event.match.1}"
+    timeout: 2000
+
+# --- conflict heal: commit + push HEAD to the PR head branch ------------
+# Identical contract to pr-heal.push: `vcs commit` stages everything
+# and `git commit` concludes the in-progress merge the agent left;
+# push is HEAD:refs/heads/<head_ref> so the detached worktree needs
+# no local branch. An agent that produced no diff fails the commit
+# honestly (no --allow-empty) instead of retriggering CI in a loop.
+- id: pr-heal.conflict.push
+  driver: shell
+  on:
+  - pr-heal.conflict.agent.done.*
+  emits:
+  - pr-heal.conflict.pushed.*
+  - pr-heal.conflict.push.failed.*
+  max_fires: unlimited
+  params:
+    cmd: |
+      set -euo pipefail
+      SHA='${event.match.1}'
+      WT="${config.worktree_base}/${SHA:0:12}"
+      NUMBER=""
+      NUMFILE="${config.worktree_base}/conflicts/${SHA}"
+      if [ -f "$NUMFILE" ]; then NUMBER=$(cat "$NUMFILE"); fi
+      if [ -z "$NUMBER" ]; then
+        JSON=$(lasius --root "${config.lasius_root}" forge pr list "${config.checkout}" --state open --json)
+        NUMBER=$(printf '%s' "$JSON" | jq -r --arg sha "$SHA" '[.[] | select(.head_sha == $sha)] | .[0].number // empty')
+      fi
+      if [ -z "$NUMBER" ]; then
+        echo "no PR recorded/found for conflicted sha $SHA — cannot name push branch"
+        exit 1
+      fi
+      VIEW=$(lasius --root "${config.lasius_root}" forge pr view "${config.checkout}" "$NUMBER" --json)
+      BRANCH=$(printf '%s' "$VIEW" | jq -r '.head_ref // empty')
+      if [ -z "$BRANCH" ]; then
+        echo "PR #$NUMBER reports no head_ref — cannot name push branch"
+        exit 1
+      fi
+      lasius --root "${config.lasius_root}" vcs commit "$WT" -m "merge base into PR head to resolve conflicts (pr-heal)" --json
+      lasius --root "${config.lasius_root}" vcs push "$WT" --branch "HEAD:refs/heads/$BRANCH" --json
+    emit:
+      '0': "pr-heal.conflict.pushed.${event.match.1}"
+      default: "pr-heal.conflict.push.failed.${event.match.1}"
+    timeout: 120
+
+# --- conflict cleanup: worktree + lock after a successful push ---------
+- id: pr-heal.conflict.cleanup
+  driver: shell
+  on:
+  - pr-heal.conflict.pushed.*
+  emits:
+  - pr-heal.conflict.cleaned.*
+  max_fires: unlimited
+  params:
+    cmd: |
+      set -uo pipefail
+      SHA='${event.match.1}'
+      WT="${config.worktree_base}/${SHA:0:12}"
+      lasius --root "${config.lasius_root}" vcs worktree remove "${config.checkout}" --dir "$WT" --json >/dev/null 2>&1 || true
+      rmdir "${config.worktree_base}/${SHA:0:12}.agent-lock" 2>/dev/null || true
+      echo "cleaned $WT"
+    emit:
+      '0': "pr-heal.conflict.cleaned.${event.match.1}"
+    timeout: 60
+
+# --- conflict cleanup: gave up — worktree stays for human inspection ----
+- id: pr-heal.conflict.cleanup.gaveup
+  driver: shell
+  on:
+  - pr-heal.conflict.attempts.gaveup.*
+  emits:
+  - pr-heal.conflict.cleaned.*
+  max_fires: unlimited
+  params:
+    cmd: |
+      set -uo pipefail
+      SHA='${event.match.1}'
+      rmdir "${config.worktree_base}/${SHA:0:12}.agent-lock" 2>/dev/null || true
+      echo "conflict gaveup cleanup for ${SHA:0:12} (worktree kept for inspection)"
+    emit:
+      '0': "pr-heal.conflict.cleaned.${event.match.1}"
+    timeout: 30
+
 # --- terminal reporting --------------------------------------------------
 - id: pr-heal.report
   driver: shell
@@ -503,6 +794,7 @@ nodes:
   - pr-heal.merged.*
   - pr-heal.merge.skipped.*
   - pr-heal.merge.failed.*
+  - pr-heal.merge.conflict.*
   - pr-heal.pushed.*
   - pr-heal.agent.done.*
   - pr-heal.agent.failed.*
@@ -511,6 +803,14 @@ nodes:
   - pr-heal.worktree.failed.*
   - pr-heal.push.failed.*
   - pr-heal.cleaned.*
+  - pr-heal.conflict.worktree.failed.*
+  - pr-heal.conflict.attempts.gaveup.*
+  - pr-heal.conflict.attempts.failed.*
+  - pr-heal.conflict.agent.done.*
+  - pr-heal.conflict.agent.failed.*
+  - pr-heal.conflict.push.failed.*
+  - pr-heal.conflict.pushed.*
+  - pr-heal.conflict.cleaned.*
   - node.exhausted
   emits:
   - pr-heal.report.done

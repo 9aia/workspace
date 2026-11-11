@@ -53,6 +53,7 @@ No raw `git`/`gh`/`devin` anywhere in `main.yaml`.
    | `checkout` | yes | local clone lasius operates on |
    | `agent` / `agent_mode` | no | sepia agent id + ACP mode (`bypass` default — see below) |
    | `max_agent_attempts` | no | per-PR heal cap (default 3, durable ledger) |
+   | `max_conflict_attempts` | no | per-PR conflict-resolution cap (default 2, durable ledger) |
    | `ci_check_name` | no | `check_run.name` to react to (default `ci`) |
    | `default_branch` | no | push-enqueue gate (default `main`) |
    | `worktree_base`, `node_url`, `lasius_root` | no | paths/URLs |
@@ -85,9 +86,21 @@ No raw `git`/`gh`/`devin` anywhere in `main.yaml`.
   `session/request_permission`; devin's default `accept-edits` prompts
   on exec and deadlocks. `bypass` auto-approves everything (fine in a
   disposable worktree); `smart` is the safer middle ground.
-- **Merge conflicts are NOT auto-resolved** — a `merge.failed` is
-  reported terminally; resolving conflicts (merge base → agent rework
-  loop) is tracked as follow-up hardening.
+- **Merge conflicts auto-resolve, bounded** — when `lasius forge pr
+  merge` fails and `pr view` reports the PR unmergeable
+  (`mergeable=CONFLICTING` / `merge_state=DIRTY`, with the merge
+  command's own output as fallback signal), the campaign emits
+  `merge.conflict.<sha>` instead of terminal `merge.failed`. A
+  conflict-heal chain then re-runs the agent loop: detached worktree
+  at the PR's *live* head (the merge node persists the PR number in
+  `<worktree_base>/conflicts/<sha>` so a moved head still resolves),
+  sepia session merges the base branch in and resolves conflicts
+  uncommitted, lasius commits (concluding the in-progress merge) and
+  pushes `HEAD:refs/heads/<head_ref>`. CI re-runs and the normal
+  green→merge path takes over. Budget: `max_conflict_attempts`
+  per PR (default 2, `<worktree_base>/attempts/pr-<n>-conflicts`);
+  over-cap gives up terminally. Non-conflict merge failures still
+  emit `merge.failed` and are reported only.
 
 ## Ops
 
@@ -97,5 +110,9 @@ No raw `git`/`gh`/`devin` anywhere in `main.yaml`.
   successful push and on PR close; kept on failures/give-ups for
   inspection (`lasius --root <ws> vcs worktree remove <checkout>
   --dir <path>` to gc manually).
-- Attempt ledger: `<worktree_base>/attempts/pr-<n>` — delete the file
-  to reset a PR's heal budget.
+- Attempt ledgers: `<worktree_base>/attempts/pr-<n>` (heals) and
+  `pr-<n>-conflicts` (conflict resolutions) — delete the file to
+  reset that PR's budget for that lane.
+- Conflict PR map: `<worktree_base>/conflicts/<sha>` holds the PR
+  number for an in-flight conflict resolution — safe to delete once
+  the PR merges or the attempt gives up.
