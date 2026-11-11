@@ -21,6 +21,7 @@ inside.
 | `repos/peregrin` | event-driven orchestration — campaigns, multi-machine |
 | `repos/bupha` | CI integration for tamias (`type: bupha`) — queue → worktree → runner (`shell`/`dagger`/`gha`) → forge status |
 | `repos/cicada` | scheduled-work engine — calendars, recurring runs |
+| `repos/scarab` | config & template expertise — generic config loading libs, templated content packs via tamias (P-017) |
 | `repos/tarsi` | release plane — changelog → bump → tag → publish; `type: tarsi` profiles, peregrin campaigns (rewrite in progress, P-013/PL-014) |
 | `repos/pavo` | agent UI / views |
 | `repos/atta` | fungus-garden layer — tended architecture (WIP) |
