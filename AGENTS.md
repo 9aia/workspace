@@ -30,7 +30,7 @@ inside.
 | `repos/camelus` | multi-tenant AI lead platform (private) |
 | `repos/castor` | SQL database CLI (private) |
 | `repos/mycena` | code scout → myco ledger (private) |
-| `repos/lasius` | workspace gardener — manages this repo |
+| `repos/lasius` | git & workspace expertise — workspace gardener CLI + shared `lasius-vcs` port (P-019) |
 | `repos/vitepress-theme-9aia` | VitePress theme |
 | `repos/slidev-theme-9aia` | Slidev theme |
 | `repos/9aia.github.io` | Gaia's website |
