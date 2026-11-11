@@ -1,0 +1,768 @@
+# docs-deploy — docs-site deployment as a peregrin campaign (PL-009 /
+# P-009). A verified `push` to a watched repo's `docs` branch →
+# detached worktree at the pushed sha → `bun install` + the repo's own
+# `docs:deploy` (vitepress build → `gh-pages`) → GitHub commit status
+# under `docs/deploy`.
+#
+# Unlike `libraries/ci-gate` this bundle DOES ship its ingress node:
+# v1 watches a fixed repo set whose webhook-secret env names follow
+# the existing `BUPHA_WH_<OWNER>_<REPO>` convention (names only —
+# `capabilities.secrets` grants them; values live in the operator's
+# env file, never here). Under `campaign serve` the shared
+# `SharedWebhook` demux delivers each verified push to every campaign
+# watching the repo, so this file can sit next to `ci-gate-full.yaml`
+# on the one listener — the `on:` patterns below match
+# `refs/heads/docs` everywhere except 9aia.github.io (whose site IS
+# main), so they never collide with ci-gate's `refs/heads/main`.
+#
+# Scope: self-contained docs trees (sepia/peregrin/lasius — the
+# `docs` orphan branch IS the site checkout) plus the gen-dependent
+# repos (myco/tamias/cuora/pavo/hypha/sturn/kuda/mimus/bupha) whose
+# `docs:deploy` runs `docs:gen`/`docs:api` steps that `cd ..` into
+# the main checkout for `cargo run`/`cargo doc`. Those git nodes use
+# `params.extra_worktrees` (PL-009 D6): the docs-branch worktree lands
+# at `<run>/docs` and a second worktree of `config.main_ref` at
+# `<run>`, so the gen steps see the same layout as a dev checkout.
+# 9aia.github.io is the odd one out: the site lives on `main` (no
+# `docs` branch), so its triplet subscribes `refs/heads/main` —
+# self-contained, no extra_worktrees. Its Pages source must be the
+# `gh-pages` branch (was `actions/deploy-pages` artifact deploy —
+# operator switches Pages source once; the built output is identical).
+name: docs-deploy
+
+# Operator-facing knobs (see params.schema.json + README.md).
+config:
+  worktree_base: "~/.local/share/peregrin/worktrees"
+  token_env: "BUPHA_TOKEN"          # NAME of the forge-token secret — never a value
+  timeout: 600                      # inner shell cap (seconds; driver caps at 600)
+  context: "docs/deploy"            # commit-status context on the pushed repo
+  main_ref: "refs/heads/main"        # ref the gen-dependent nodes check out at <run>
+  # The deploy command, run at the worktree root (the docs branch
+  # root). `bun install` first — a fresh worktree has no node_modules
+  # (`--frozen-lockfile` when bun.lock is committed, plain install as
+  # fallback). gh-pages pushes the `gh-pages` branch: the worktree's
+  # `origin` is the clone_url the webhook reported, and the
+  # env-scoped `credential.helper` + author/committer env give the
+  # push auth and a commit identity WITHOUT writing the token into
+  # any git config (the bare clone cache under worktree_base/.repos
+  # stays clean). `$BUPHA_TOKEN` is the ambient env name — it must
+  # match `token_env` above.
+  cmd: >-
+    bash -lc 'set -e;
+    bun install --frozen-lockfile 2>/dev/null || bun install;
+    export GIT_CONFIG_COUNT=1
+    GIT_CONFIG_KEY_0=credential.helper
+    GIT_CONFIG_VALUE_0="!f() { echo username=x-access-token; echo password=$BUPHA_TOKEN; }; f"
+    GIT_AUTHOR_NAME=docs-deploy
+    GIT_AUTHOR_EMAIL=docs-deploy@users.noreply.github.com
+    GIT_COMMITTER_NAME=docs-deploy
+    GIT_COMMITTER_EMAIL=docs-deploy@users.noreply.github.com;
+    export CARGO_TARGET_DIR="$HOME/.local/share/peregrin/cargo-target";
+    bun run docs:deploy'
+
+# Queue policy (docs/reference/queue-supersede.md): pushes on the same
+# (repo, ref) are alternative triggers for one logical deploy — the
+# newest wins, a newer push cancels the in-flight one.
+supersede:
+  key: "{repo}:{ref}"
+  mode: latest-wins
+  cancel_running: true
+
+# Secret NAMES the drivers may resolve — the webhook HMAC secret per
+# watched repo plus the forge token. Values never appear here.
+capabilities:
+  secrets:
+    - BUPHA_TOKEN
+    - BUPHA_WH_9AIA_SEPIA
+    - BUPHA_WH_9AIA_PEREGRIN
+    - BUPHA_WH_9AIA_LASIUS
+    - BUPHA_WH_9AIA_MYCO
+    - BUPHA_WH_9AIA_TAMIAS
+    - BUPHA_WH_9AIA_CUORA
+    - BUPHA_WH_9AIA_PAVO
+    - BUPHA_WH_9AIA_HYPHA
+    - BUPHA_WH_9AIA_STURN
+    - BUPHA_WH_9AIA_KUDA
+    - BUPHA_WH_9AIA_MIMUS
+    - BUPHA_WH_9AIA_BUPHA
+    - BUPHA_WH_9AIA_GITHUB_IO
+
+annotations:
+  title: Docs deploy
+  description: >-
+    Push to refs/heads/docs → detached worktree at sha → bun install +
+    docs:deploy (vitepress build → gh-pages) → docs/deploy commit
+    status. The GHA deploy.yml replacement as a campaign.
+  since: "0.1.0"
+
+nodes:
+  # Ingress — one listener, one route per watched repo. `secret_env`
+  # names the HMAC secret key resolved through capabilities.secrets.
+  # Under `campaign serve` listen/path are ignored (the daemon's
+  # --listen/--path govern the shared socket); they matter for a solo
+  # `campaign run`.
+  - id: docs.ingress.webhook
+    driver: github-webhook
+    on: [start]
+    emits: [docs.ingress.webhook.listening, push]
+    params:
+      listen: 127.0.0.1:29173
+      path: /hook
+      repos:
+        - name: 9aia/sepia
+          secret_env: BUPHA_WH_9AIA_SEPIA
+        - name: 9aia/peregrin
+          secret_env: BUPHA_WH_9AIA_PEREGRIN
+        - name: 9aia/lasius
+          secret_env: BUPHA_WH_9AIA_LASIUS
+        - name: 9aia/myco
+          secret_env: BUPHA_WH_9AIA_MYCO
+        - name: 9aia/tamias
+          secret_env: BUPHA_WH_9AIA_TAMIAS
+        - name: 9aia/cuora
+          secret_env: BUPHA_WH_9AIA_CUORA
+        - name: 9aia/pavo
+          secret_env: BUPHA_WH_9AIA_PAVO
+        - name: 9aia/hypha
+          secret_env: BUPHA_WH_9AIA_HYPHA
+        - name: 9aia/sturn
+          secret_env: BUPHA_WH_9AIA_STURN
+        - name: 9aia/kuda
+          secret_env: BUPHA_WH_9AIA_KUDA
+        - name: 9aia/mimus
+          secret_env: BUPHA_WH_9AIA_MIMUS
+        - name: 9aia/bupha
+          secret_env: BUPHA_WH_9AIA_BUPHA
+        - name: 9aia/9aia.github.io
+          secret_env: BUPHA_WH_9AIA_GITHUB_IO
+
+  # Route every verified push as a typed event
+  # `push.<repo>.<ref>.<clone_url>.<sha>` — `on:` matches types only,
+  # so the fields ride the type and downstream nodes recover them via
+  # ${event.match.N} (`**` re-joins clone_url's `.`-separated
+  # segments; the trailing `*` is the sha). Non-docs pushes route but
+  # match no subscription and die there.
+  - id: docs.route
+    driver: shell
+    on: [push]
+    max_fires: unlimited
+    emits: [push.**, route.unmatched]
+    params:
+      cmd: "true"
+      emit:
+        "0": "push.${event.payload.repo}.${event.payload.ref}.${event.payload.clone_url}.${event.payload.sha}"
+        default: "route.unmatched"
+
+  # --- per-repo deploy pipelines -------------------------------------
+  # Each: git worktree → inner shell → pending + verdict statuses.
+  # `on:` pins repo AND refs/heads/docs, so main-branch pushes on the
+  # same repos (ci-gate's territory) never fire these.
+
+  - id: docs.9aia-sepia
+    driver: git
+    on: [push.9aia/sepia.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-sepia.done, docs.9aia-sepia.failed]
+    params:
+      url: "${event.match.1}"
+      sha: "${event.match.2}"
+      base: "${config.worktree_base}"
+      token_env: "${config.token_env}"
+      inner:
+        driver: shell
+        params:
+          cmd: "${config.cmd}"
+          timeout: "${config.timeout:-600}"
+      emit:
+        "0": "docs.9aia-sepia.done"
+        default: "docs.9aia-sepia.failed"
+  - id: docs.9aia-sepia.pending
+    driver: github-status
+    on: [push.9aia/sepia.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-sepia.status-posted]
+    params:
+      repo: "9aia/sepia"
+      sha: "${event.match.2}"
+      state: pending
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+  - id: docs.9aia-sepia.status
+    driver: github-status
+    on: [docs.9aia-sepia.done, docs.9aia-sepia.failed, docs.9aia-sepia.failed.*]
+    max_fires: unlimited
+    emits: [docs.9aia-sepia.status-posted]
+    params:
+      repo: "9aia/sepia"
+      sha: "${event.payload.sha:-${event.match.1}}"
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+      description: "${event.type}"
+
+  - id: docs.9aia-peregrin
+    driver: git
+    on: [push.9aia/peregrin.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-peregrin.done, docs.9aia-peregrin.failed]
+    params:
+      url: "${event.match.1}"
+      sha: "${event.match.2}"
+      base: "${config.worktree_base}"
+      token_env: "${config.token_env}"
+      inner:
+        driver: shell
+        params:
+          cmd: "${config.cmd}"
+          timeout: "${config.timeout:-600}"
+      emit:
+        "0": "docs.9aia-peregrin.done"
+        default: "docs.9aia-peregrin.failed"
+  - id: docs.9aia-peregrin.pending
+    driver: github-status
+    on: [push.9aia/peregrin.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-peregrin.status-posted]
+    params:
+      repo: "9aia/peregrin"
+      sha: "${event.match.2}"
+      state: pending
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+  - id: docs.9aia-peregrin.status
+    driver: github-status
+    on: [docs.9aia-peregrin.done, docs.9aia-peregrin.failed, docs.9aia-peregrin.failed.*]
+    max_fires: unlimited
+    emits: [docs.9aia-peregrin.status-posted]
+    params:
+      repo: "9aia/peregrin"
+      sha: "${event.payload.sha:-${event.match.1}}"
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+      description: "${event.type}"
+
+  - id: docs.9aia-lasius
+    driver: git
+    on: [push.9aia/lasius.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-lasius.done, docs.9aia-lasius.failed]
+    params:
+      url: "${event.match.1}"
+      sha: "${event.match.2}"
+      base: "${config.worktree_base}"
+      token_env: "${config.token_env}"
+      inner:
+        driver: shell
+        params:
+          cmd: "${config.cmd}"
+          timeout: "${config.timeout:-600}"
+      emit:
+        "0": "docs.9aia-lasius.done"
+        default: "docs.9aia-lasius.failed"
+  - id: docs.9aia-lasius.pending
+    driver: github-status
+    on: [push.9aia/lasius.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-lasius.status-posted]
+    params:
+      repo: "9aia/lasius"
+      sha: "${event.match.2}"
+      state: pending
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+  - id: docs.9aia-lasius.status
+    driver: github-status
+    on: [docs.9aia-lasius.done, docs.9aia-lasius.failed, docs.9aia-lasius.failed.*]
+    max_fires: unlimited
+    emits: [docs.9aia-lasius.status-posted]
+    params:
+      repo: "9aia/lasius"
+      sha: "${event.payload.sha:-${event.match.1}}"
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+      description: "${event.type}"
+
+
+  - id: docs.9aia-myco
+    driver: git
+    on: [push.9aia/myco.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-myco.done, docs.9aia-myco.failed]
+    params:
+      url: "${event.match.1}"
+      sha: "${event.match.2}"
+      base: "${config.worktree_base}"
+      token_env: "${config.token_env}"
+      # Dual checkout (D6): docs worktree at <run>/docs, main_ref worktree
+      # at <run> — docs:deploy's gen steps `cd ..` into the main checkout
+      # for cargo. Inner cwd stays the docs worktree.
+      dest: "docs-myco-${event.match.2}/docs"
+      extra_worktrees:
+        - ref: "${config.main_ref}"
+      inner:
+        driver: shell
+        params:
+          cmd: "${config.cmd}"
+          timeout: "${config.timeout:-600}"
+      emit:
+        "0": "docs.9aia-myco.done"
+        default: "docs.9aia-myco.failed"
+  - id: docs.9aia-myco.pending
+    driver: github-status
+    on: [push.9aia/myco.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-myco.status-posted]
+    params:
+      repo: "9aia/myco"
+      sha: "${event.match.2}"
+      state: pending
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+  - id: docs.9aia-myco.status
+    driver: github-status
+    on: [docs.9aia-myco.done, docs.9aia-myco.failed, docs.9aia-myco.failed.*]
+    max_fires: unlimited
+    emits: [docs.9aia-myco.status-posted]
+    params:
+      repo: "9aia/myco"
+      sha: "${event.payload.sha:-${event.match.1}}"
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+      description: "${event.type}"
+
+  - id: docs.9aia-tamias
+    driver: git
+    on: [push.9aia/tamias.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-tamias.done, docs.9aia-tamias.failed]
+    params:
+      url: "${event.match.1}"
+      sha: "${event.match.2}"
+      base: "${config.worktree_base}"
+      token_env: "${config.token_env}"
+      # Dual checkout (D6): docs worktree at <run>/docs, main_ref worktree
+      # at <run> — docs:deploy's gen steps `cd ..` into the main checkout
+      # for cargo. Inner cwd stays the docs worktree.
+      dest: "docs-tamias-${event.match.2}/docs"
+      extra_worktrees:
+        - ref: "${config.main_ref}"
+      inner:
+        driver: shell
+        params:
+          cmd: "${config.cmd}"
+          timeout: "${config.timeout:-600}"
+      emit:
+        "0": "docs.9aia-tamias.done"
+        default: "docs.9aia-tamias.failed"
+  - id: docs.9aia-tamias.pending
+    driver: github-status
+    on: [push.9aia/tamias.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-tamias.status-posted]
+    params:
+      repo: "9aia/tamias"
+      sha: "${event.match.2}"
+      state: pending
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+  - id: docs.9aia-tamias.status
+    driver: github-status
+    on: [docs.9aia-tamias.done, docs.9aia-tamias.failed, docs.9aia-tamias.failed.*]
+    max_fires: unlimited
+    emits: [docs.9aia-tamias.status-posted]
+    params:
+      repo: "9aia/tamias"
+      sha: "${event.payload.sha:-${event.match.1}}"
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+      description: "${event.type}"
+
+  - id: docs.9aia-cuora
+    driver: git
+    on: [push.9aia/cuora.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-cuora.done, docs.9aia-cuora.failed]
+    params:
+      url: "${event.match.1}"
+      sha: "${event.match.2}"
+      base: "${config.worktree_base}"
+      token_env: "${config.token_env}"
+      # Dual checkout (D6): docs worktree at <run>/docs, main_ref worktree
+      # at <run> — docs:deploy's gen steps `cd ..` into the main checkout
+      # for cargo. Inner cwd stays the docs worktree.
+      dest: "docs-cuora-${event.match.2}/docs"
+      extra_worktrees:
+        - ref: "${config.main_ref}"
+      inner:
+        driver: shell
+        params:
+          cmd: "${config.cmd}"
+          timeout: "${config.timeout:-600}"
+      emit:
+        "0": "docs.9aia-cuora.done"
+        default: "docs.9aia-cuora.failed"
+  - id: docs.9aia-cuora.pending
+    driver: github-status
+    on: [push.9aia/cuora.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-cuora.status-posted]
+    params:
+      repo: "9aia/cuora"
+      sha: "${event.match.2}"
+      state: pending
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+  - id: docs.9aia-cuora.status
+    driver: github-status
+    on: [docs.9aia-cuora.done, docs.9aia-cuora.failed, docs.9aia-cuora.failed.*]
+    max_fires: unlimited
+    emits: [docs.9aia-cuora.status-posted]
+    params:
+      repo: "9aia/cuora"
+      sha: "${event.payload.sha:-${event.match.1}}"
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+      description: "${event.type}"
+
+  - id: docs.9aia-pavo
+    driver: git
+    on: [push.9aia/pavo.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-pavo.done, docs.9aia-pavo.failed]
+    params:
+      url: "${event.match.1}"
+      sha: "${event.match.2}"
+      base: "${config.worktree_base}"
+      token_env: "${config.token_env}"
+      # Dual checkout (D6): docs worktree at <run>/docs, main_ref worktree
+      # at <run> — docs:deploy's gen steps `cd ..` into the main checkout
+      # for cargo. Inner cwd stays the docs worktree.
+      dest: "docs-pavo-${event.match.2}/docs"
+      extra_worktrees:
+        - ref: "${config.main_ref}"
+      inner:
+        driver: shell
+        params:
+          cmd: "${config.cmd}"
+          timeout: "${config.timeout:-600}"
+      emit:
+        "0": "docs.9aia-pavo.done"
+        default: "docs.9aia-pavo.failed"
+  - id: docs.9aia-pavo.pending
+    driver: github-status
+    on: [push.9aia/pavo.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-pavo.status-posted]
+    params:
+      repo: "9aia/pavo"
+      sha: "${event.match.2}"
+      state: pending
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+  - id: docs.9aia-pavo.status
+    driver: github-status
+    on: [docs.9aia-pavo.done, docs.9aia-pavo.failed, docs.9aia-pavo.failed.*]
+    max_fires: unlimited
+    emits: [docs.9aia-pavo.status-posted]
+    params:
+      repo: "9aia/pavo"
+      sha: "${event.payload.sha:-${event.match.1}}"
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+      description: "${event.type}"
+
+  - id: docs.9aia-hypha
+    driver: git
+    on: [push.9aia/hypha.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-hypha.done, docs.9aia-hypha.failed]
+    params:
+      url: "${event.match.1}"
+      sha: "${event.match.2}"
+      base: "${config.worktree_base}"
+      token_env: "${config.token_env}"
+      # Dual checkout (D6): docs worktree at <run>/docs, main_ref worktree
+      # at <run> — docs:deploy's gen steps `cd ..` into the main checkout
+      # for cargo. Inner cwd stays the docs worktree.
+      dest: "docs-hypha-${event.match.2}/docs"
+      extra_worktrees:
+        - ref: "${config.main_ref}"
+      inner:
+        driver: shell
+        params:
+          cmd: "${config.cmd}"
+          timeout: "${config.timeout:-600}"
+      emit:
+        "0": "docs.9aia-hypha.done"
+        default: "docs.9aia-hypha.failed"
+  - id: docs.9aia-hypha.pending
+    driver: github-status
+    on: [push.9aia/hypha.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-hypha.status-posted]
+    params:
+      repo: "9aia/hypha"
+      sha: "${event.match.2}"
+      state: pending
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+  - id: docs.9aia-hypha.status
+    driver: github-status
+    on: [docs.9aia-hypha.done, docs.9aia-hypha.failed, docs.9aia-hypha.failed.*]
+    max_fires: unlimited
+    emits: [docs.9aia-hypha.status-posted]
+    params:
+      repo: "9aia/hypha"
+      sha: "${event.payload.sha:-${event.match.1}}"
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+      description: "${event.type}"
+
+  - id: docs.9aia-sturn
+    driver: git
+    on: [push.9aia/sturn.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-sturn.done, docs.9aia-sturn.failed]
+    params:
+      url: "${event.match.1}"
+      sha: "${event.match.2}"
+      base: "${config.worktree_base}"
+      token_env: "${config.token_env}"
+      # Dual checkout (D6): docs worktree at <run>/docs, main_ref worktree
+      # at <run> — docs:deploy's gen steps `cd ..` into the main checkout
+      # for cargo. Inner cwd stays the docs worktree.
+      dest: "docs-sturn-${event.match.2}/docs"
+      extra_worktrees:
+        - ref: "${config.main_ref}"
+      inner:
+        driver: shell
+        params:
+          cmd: "${config.cmd}"
+          timeout: "${config.timeout:-600}"
+      emit:
+        "0": "docs.9aia-sturn.done"
+        default: "docs.9aia-sturn.failed"
+  - id: docs.9aia-sturn.pending
+    driver: github-status
+    on: [push.9aia/sturn.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-sturn.status-posted]
+    params:
+      repo: "9aia/sturn"
+      sha: "${event.match.2}"
+      state: pending
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+  - id: docs.9aia-sturn.status
+    driver: github-status
+    on: [docs.9aia-sturn.done, docs.9aia-sturn.failed, docs.9aia-sturn.failed.*]
+    max_fires: unlimited
+    emits: [docs.9aia-sturn.status-posted]
+    params:
+      repo: "9aia/sturn"
+      sha: "${event.payload.sha:-${event.match.1}}"
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+      description: "${event.type}"
+
+  - id: docs.9aia-kuda
+    driver: git
+    on: [push.9aia/kuda.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-kuda.done, docs.9aia-kuda.failed]
+    params:
+      url: "${event.match.1}"
+      sha: "${event.match.2}"
+      base: "${config.worktree_base}"
+      token_env: "${config.token_env}"
+      # Dual checkout (D6): docs worktree at <run>/docs, main_ref worktree
+      # at <run> — docs:deploy's gen steps `cd ..` into the main checkout
+      # for cargo. Inner cwd stays the docs worktree.
+      dest: "docs-kuda-${event.match.2}/docs"
+      extra_worktrees:
+        - ref: "${config.main_ref}"
+      inner:
+        driver: shell
+        params:
+          cmd: "${config.cmd}"
+          timeout: "${config.timeout:-600}"
+      emit:
+        "0": "docs.9aia-kuda.done"
+        default: "docs.9aia-kuda.failed"
+  - id: docs.9aia-kuda.pending
+    driver: github-status
+    on: [push.9aia/kuda.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-kuda.status-posted]
+    params:
+      repo: "9aia/kuda"
+      sha: "${event.match.2}"
+      state: pending
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+  - id: docs.9aia-kuda.status
+    driver: github-status
+    on: [docs.9aia-kuda.done, docs.9aia-kuda.failed, docs.9aia-kuda.failed.*]
+    max_fires: unlimited
+    emits: [docs.9aia-kuda.status-posted]
+    params:
+      repo: "9aia/kuda"
+      sha: "${event.payload.sha:-${event.match.1}}"
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+      description: "${event.type}"
+
+  - id: docs.9aia-mimus
+    driver: git
+    on: [push.9aia/mimus.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-mimus.done, docs.9aia-mimus.failed]
+    params:
+      url: "${event.match.1}"
+      sha: "${event.match.2}"
+      base: "${config.worktree_base}"
+      token_env: "${config.token_env}"
+      # Dual checkout (D6): docs worktree at <run>/docs, main_ref worktree
+      # at <run> — docs:deploy's gen steps `cd ..` into the main checkout
+      # for cargo. Inner cwd stays the docs worktree.
+      dest: "docs-mimus-${event.match.2}/docs"
+      extra_worktrees:
+        - ref: "${config.main_ref}"
+      inner:
+        driver: shell
+        params:
+          cmd: "${config.cmd}"
+          timeout: "${config.timeout:-600}"
+      emit:
+        "0": "docs.9aia-mimus.done"
+        default: "docs.9aia-mimus.failed"
+  - id: docs.9aia-mimus.pending
+    driver: github-status
+    on: [push.9aia/mimus.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-mimus.status-posted]
+    params:
+      repo: "9aia/mimus"
+      sha: "${event.match.2}"
+      state: pending
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+  - id: docs.9aia-mimus.status
+    driver: github-status
+    on: [docs.9aia-mimus.done, docs.9aia-mimus.failed, docs.9aia-mimus.failed.*]
+    max_fires: unlimited
+    emits: [docs.9aia-mimus.status-posted]
+    params:
+      repo: "9aia/mimus"
+      sha: "${event.payload.sha:-${event.match.1}}"
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+      description: "${event.type}"
+
+  - id: docs.9aia-bupha
+    driver: git
+    on: [push.9aia/bupha.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-bupha.done, docs.9aia-bupha.failed]
+    params:
+      url: "${event.match.1}"
+      sha: "${event.match.2}"
+      base: "${config.worktree_base}"
+      token_env: "${config.token_env}"
+      # Dual checkout (D6): docs worktree at <run>/docs, main_ref worktree
+      # at <run> — docs:deploy's gen steps `cd ..` into the main checkout
+      # for cargo. Inner cwd stays the docs worktree.
+      dest: "docs-bupha-${event.match.2}/docs"
+      extra_worktrees:
+        - ref: "${config.main_ref}"
+      inner:
+        driver: shell
+        params:
+          cmd: "${config.cmd}"
+          timeout: "${config.timeout:-600}"
+      emit:
+        "0": "docs.9aia-bupha.done"
+        default: "docs.9aia-bupha.failed"
+  - id: docs.9aia-bupha.pending
+    driver: github-status
+    on: [push.9aia/bupha.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-bupha.status-posted]
+    params:
+      repo: "9aia/bupha"
+      sha: "${event.match.2}"
+      state: pending
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+  - id: docs.9aia-bupha.status
+    driver: github-status
+    on: [docs.9aia-bupha.done, docs.9aia-bupha.failed, docs.9aia-bupha.failed.*]
+    max_fires: unlimited
+    emits: [docs.9aia-bupha.status-posted]
+    params:
+      repo: "9aia/bupha"
+      sha: "${event.payload.sha:-${event.match.1}}"
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+      description: "${event.type}"
+
+  # 9aia.github.io — the org site lives on `main` (no docs branch), so
+  # this triplet subscribes refs/heads/main; self-contained (site
+  # checkout IS the repo root), no extra_worktrees.
+  - id: docs.9aia-github-io
+    driver: git
+    on: [push.9aia/9aia.github.io.refs/heads/main.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-github-io.done, docs.9aia-github-io.failed]
+    params:
+      url: "${event.match.1}"
+      sha: "${event.match.2}"
+      base: "${config.worktree_base}"
+      token_env: "${config.token_env}"
+      inner:
+        driver: shell
+        params:
+          cmd: "${config.cmd}"
+          timeout: "${config.timeout:-600}"
+      emit:
+        "0": "docs.9aia-github-io.done"
+        default: "docs.9aia-github-io.failed"
+  - id: docs.9aia-github-io.pending
+    driver: github-status
+    on: [push.9aia/9aia.github.io.refs/heads/main.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-github-io.status-posted]
+    params:
+      repo: "9aia/9aia.github.io"
+      sha: "${event.match.2}"
+      state: pending
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+  - id: docs.9aia-github-io.status
+    driver: github-status
+    on: [docs.9aia-github-io.done, docs.9aia-github-io.failed, docs.9aia-github-io.failed.*]
+    max_fires: unlimited
+    emits: [docs.9aia-github-io.status-posted]
+    params:
+      repo: "9aia/9aia.github.io"
+      sha: "${event.payload.sha:-${event.match.1}}"
+      context: "${config.context}"
+      token_env: "${config.token_env}"
+      description: "${event.type}"
+
+  # driver-git emits plain `node.failed` for clone/checkout/
+  # materialization failures — not the emit-mapped `<node>.failed`.
+  # Remap any node.failed carrying {node, sha} onto
+  # `<node>.failed.<sha>` so the per-repo verdict sinks see
+  # materialization failures too (the trailing type segment is the
+  # sha; the status nodes' `failed.*` subscription +
+  # `${event.match.1}` sha pick it up).
+  - id: docs.failmap
+    driver: shell
+    on: [node.failed]
+    max_fires: unlimited
+    emits: [docs.unmapped]
+    params:
+      cmd: 'test -n "${event.payload.node}" && test -n "${event.payload.sha}"'
+      emit:
+        "0": "${event.payload.node}.failed.${event.payload.sha}"
+        default: "docs.unmapped"
