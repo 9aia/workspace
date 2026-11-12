@@ -1,0 +1,719 @@
+# new-feat — end-to-end feature implementation workflow (PL-015
+# migration of libraries/common/new-feat).
+#
+# Pipeline (manually triggered, `on: start`):
+#   worktree → adr → write-tests → commit-tests
+#   → impl → commit-impl → test
+#   → (fix + commit) up to 3 times until tests pass
+#   → pr → review
+#   → (rework + commit) up to 3 times until approved
+#   → squash-merge → report
+#
+# Boundaries: lasius owns every git/forge call (worktree, commit,
+# push, PR create/list/merge), sepia owns every agent turn (POST
+# /api/sessions/run → sessions.prompt_wait), peregrin owns only
+# event routing. No raw git/gh/devin anywhere in this file — the
+# old agent/*, git/* and github/* snippets are all inlined here
+# under the new owners.
+#
+# Stateless like pr-heal: the Rust engine has no stdout→state
+# channel, so every node re-derives feat_id/worktree/branch from
+# config (deterministic slug) instead of ${state.*}. Per-run knobs
+# (feat_id, feat_description, checkout, …) live in `config:` —
+# `campaign run` has no --config flag, so run via a wrapper yaml:
+#
+#   # run-my-feat.yaml
+#   include:
+#     - /path/to/workflows/new-feat/main.yaml
+#   config:
+#     feat_id: "my-feature"
+#     feat_description: "what it does"
+#     checkout: "/path/to/clone"
+#   then: peregrin campaign run run-my-feat.yaml
+#
+# (config deep-merges, outer keys win — same mechanism
+# `~/.config/peregrin/serve/*.yaml` uses.)
+name: new-feat
+
+annotations:
+  title: New feature workflow
+  description: >-
+    End-to-end feature implementation: lasius worktree → sepia ADR →
+    sepia tests → lasius commit → sepia impl → lasius commit → test
+    loop (≤3) → lasius PR → sepia review → rework loop (≤3) →
+    lasius squash-merge.
+  author: 9aia
+  tags: [new-feat, feature, agent, workflow]
+  since: "0.1.0"
+
+# Operator-facing knobs — see params.schema.json + README.md.
+# `feat_id`, `feat_description` and `checkout` MUST be set per run
+# (wrapper yaml or edited config block).
+config:
+  # Feature id — drives the branch name (feat/<id>), the worktree
+  # dir (wt-<slug>) and docs/adr/<id>.md inside agent prompts.
+  feat_id: ""
+  # One-paragraph feature description handed to every agent prompt.
+  feat_description: ""
+  # Local clone lasius operates on (any checkout path inside a
+  # lasius workspace). REQUIRED per run.
+  checkout: ""
+  # lasius workspace root (--root) — repo args are checkout paths,
+  # so any lasius.toml workspace works; the org workspace is the
+  # natural choice.
+  lasius_root: "/home/luis/GitHub/9aia/workspace"
+  # Base URL of `peregrin serve`/`peregrin-node` — agent steps POST
+  # /api/sessions/run here; bearer = PEREGRIN_TOKEN.
+  node_url: "http://127.0.0.1:18787"
+  # Worktrees land at <worktree_base>/<worktree_prefix>-<slug>.
+  worktree_base: "$HOME/.local/share/new-feat/worktrees"
+  worktree_prefix: "wt"
+  # Branch prefix — the PR head branch is <branch_prefix>/<feat_id>.
+  branch_prefix: "feat"
+  # PR base branch (also the worktree --rev: origin/<pr_base>).
+  pr_base: "main"
+  # Test command run inside the worktree after impl and after each
+  # fix commit. Override per repo (e.g. "cargo test", "pytest").
+  test_cmd: "bun test"
+  # sepia agent-config id for all agent turns (e.g. devin).
+  agent: "devin"
+  # ACP session mode applied via session/set_mode — REQUIRED for
+  # unattended runs: devin's default accept-edits prompts on exec
+  # and nothing answers, deadlocking the turn. "bypass"
+  # auto-approves everything (fine inside a disposable worktree);
+  # "smart" is the safer middle ground.
+  agent_mode: "bypass"
+
+capabilities:
+  secrets:
+    - PEREGRIN_TOKEN
+
+events:
+  - type: start
+  - type: new-feat.worktree.ready
+  - type: new-feat.worktree.failed
+  - type: new-feat.adr.done
+  - type: new-feat.adr.failed
+  - type: new-feat.write-tests.done
+  - type: new-feat.write-tests.failed
+  - type: new-feat.commit.tests.done
+  - type: new-feat.commit.tests.failed
+  - type: new-feat.impl.done
+  - type: new-feat.impl.failed
+  - type: new-feat.commit.impl.done
+  - type: new-feat.commit.impl.failed
+  - type: new-feat.test.passed
+  - type: new-feat.test.failed
+  - type: new-feat.fix.done
+  - type: new-feat.fix.failed
+  - type: new-feat.commit.fix.done
+  - type: new-feat.commit.fix.failed
+  - type: new-feat.pr.created
+  - type: new-feat.pr.failed
+  - type: new-feat.review.approved
+  - type: new-feat.review.rejected
+  - type: new-feat.rework.done
+  - type: new-feat.rework.failed
+  - type: new-feat.commit.rework.done
+  - type: new-feat.commit.rework.failed
+  - type: new-feat.merged
+  - type: new-feat.merge.failed
+  - type: new-feat.complete
+  - type: new-feat.aborted
+  - type: node.exhausted
+
+nodes:
+# --- worktree: lasius fetch + worktree add on a fresh feat branch ------
+# Replaces git/worktree.node.yml (raw git fetch/worktree add/branch
+# -D). Stateless: the path/branch are deterministic per feat_id, so
+# downstream nodes recompute them — the echoed key=value lines are
+# logs only (no stdout→state channel in the Rust engine).
+# TODO(lasius): there is no `vcs branch delete` verb — the old flow
+# deleted a stale feat/<id> branch before re-creating it. Here a
+# leftover branch makes `worktree add --branch` fail honestly
+# (new-feat.worktree.failed → abort). Delete it by hand or pick a
+# new feat_id to retry.
+- id: new-feat.worktree
+  driver: shell
+  on: [start]
+  emits: [new-feat.worktree.ready, new-feat.worktree.failed]
+  max_fires: 1
+  retry:
+    max_attempts: 2
+    delay: 1000
+    backoff: fixed
+  params:
+    env:
+      FEAT_ID: "${config.feat_id}"
+    cmd: |
+      set -euo pipefail
+      if [ -z "$FEAT_ID" ]; then
+        echo "config.feat_id is empty — set it in a wrapper yaml's config block"
+        exit 1
+      fi
+      SLUG=$(printf '%s' "$FEAT_ID" | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/${config.worktree_prefix}-${SLUG}"
+      BRANCH="${config.branch_prefix}/$FEAT_ID"
+      mkdir -p "${config.worktree_base}"
+      lasius --root "${config.lasius_root}" vcs fetch "${config.checkout}" --json >/dev/null
+      lasius --root "${config.lasius_root}" vcs worktree remove "${config.checkout}" --dir "$WT" --json >/dev/null 2>&1 || true
+      lasius --root "${config.lasius_root}" vcs worktree add "${config.checkout}" --dir "$WT" --branch "$BRANCH" --rev "origin/${config.pr_base}" --json >/dev/null
+      echo "worktree_path=$WT"
+      echo "branch=$BRANCH"
+    emit:
+      '0': new-feat.worktree.ready
+      default: new-feat.worktree.failed
+    timeout: 120
+
+# --- agent turns: sepia POST /api/sessions/run -------------------------
+# Replaces agent/base.node.yml (`driver: agent` spawning `devin -p`).
+# shell+curl (not driver:http) so the bearer token rides curl's
+# --config stdin instead of `ps` argv. `mode` is REQUIRED:
+# devin's default prompts on exec and an unattended turn deadlocks.
+# Agent prompts are inlined (the old new-feat.prompt.yml content,
+# ${state.*} placeholders rewritten to jq --arg values); agents are
+# told NOT to commit/push — every git/forge mutation is a campaign
+# node through lasius.
+- id: new-feat.adr
+  driver: shell
+  on: [new-feat.worktree.ready]
+  emits: [new-feat.adr.done, new-feat.adr.failed]
+  max_fires: 1
+  retry:
+    max_attempts: 2
+    delay: 5000
+    backoff: fixed
+  params:
+    env:
+      NEWFEAT_TOKEN: "${secret.PEREGRIN_TOKEN}"
+      FEAT_ID: "${config.feat_id}"
+      FEAT_DESC: "${config.feat_description}"
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' "$FEAT_ID" | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/${config.worktree_prefix}-${SLUG}"
+      BODY=$(jq -n \
+        --arg cwd "$WT" \
+        --arg id "$FEAT_ID" \
+        --arg desc "$FEAT_DESC" \
+        --arg agent "${config.agent}" \
+        --arg mode "${config.agent_mode}" \
+        --argjson timeout 1800000 \
+        '{cwd:$cwd, agent:$agent, mode:$mode, timeoutMs:$timeout, text:(
+          "We are implementing feature \u0027" + $id + "\u0027: " + $desc + ".\n" +
+          "Working in " + $cwd + " on the current feature branch.\n\n" +
+          "Write or update the ADR at docs/adr/" + $id + ".md describing the design decisions for this feature.\n\n" +
+          "Do NOT commit, push, or open a PR — the campaign owns all git and forge operations."
+        )}')
+      RESP=$(printf 'header = "authorization: Bearer %s"\n' "$NEWFEAT_TOKEN" |
+        curl -sf --max-time 1900 --config - \
+        -X POST "${config.node_url}/api/sessions/run" \
+        -H 'content-type: application/json' -d "$BODY")
+      echo "$RESP" | jq .
+      printf '%s' "$RESP" | jq -e '(.stopReason == "end_turn" or .stopReason == "cancelled") and (.timedOut != true)' >/dev/null
+    emit:
+      '0': new-feat.adr.done
+      default: new-feat.adr.failed
+    timeout: 2000
+
+- id: new-feat.write-tests
+  driver: shell
+  on: [new-feat.adr.done]
+  emits: [new-feat.write-tests.done, new-feat.write-tests.failed]
+  max_fires: 1
+  retry:
+    max_attempts: 2
+    delay: 5000
+    backoff: fixed
+  params:
+    env:
+      NEWFEAT_TOKEN: "${secret.PEREGRIN_TOKEN}"
+      FEAT_ID: "${config.feat_id}"
+      FEAT_DESC: "${config.feat_description}"
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' "$FEAT_ID" | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/${config.worktree_prefix}-${SLUG}"
+      BODY=$(jq -n \
+        --arg cwd "$WT" \
+        --arg id "$FEAT_ID" \
+        --arg desc "$FEAT_DESC" \
+        --arg agent "${config.agent}" \
+        --arg mode "${config.agent_mode}" \
+        --argjson timeout 1800000 \
+        '{cwd:$cwd, agent:$agent, mode:$mode, timeoutMs:$timeout, text:(
+          "We are implementing feature \u0027" + $id + "\u0027: " + $desc + ".\n" +
+          "Working in " + $cwd + " on the current feature branch.\n\n" +
+          "Write tests first, before any implementation. The tests define the contract the implementation must satisfy.\n\n" +
+          "Do NOT commit, push, or open a PR — the campaign owns all git and forge operations."
+        )}')
+      RESP=$(printf 'header = "authorization: Bearer %s"\n' "$NEWFEAT_TOKEN" |
+        curl -sf --max-time 1900 --config - \
+        -X POST "${config.node_url}/api/sessions/run" \
+        -H 'content-type: application/json' -d "$BODY")
+      echo "$RESP" | jq .
+      printf '%s' "$RESP" | jq -e '(.stopReason == "end_turn" or .stopReason == "cancelled") and (.timedOut != true)' >/dev/null
+    emit:
+      '0': new-feat.write-tests.done
+      default: new-feat.write-tests.failed
+    timeout: 2000
+
+# --- commit-tests: lasius vcs commit ------------------------------------
+# Replaces git/commit.node.yml (raw git add/commit). --allow-empty
+# preserves the old semantics: an agent turn that produced no diff
+# still commits so the pipeline advances honestly.
+- id: new-feat.commit-tests
+  driver: shell
+  on: [new-feat.write-tests.done]
+  emits: [new-feat.commit.tests.done, new-feat.commit.tests.failed]
+  max_fires: 1
+  retry:
+    max_attempts: 2
+    delay: 1000
+    backoff: fixed
+  params:
+    env:
+      FEAT_ID: "${config.feat_id}"
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' "$FEAT_ID" | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/${config.worktree_prefix}-${SLUG}"
+      lasius --root "${config.lasius_root}" vcs commit "$WT" \
+        -m "test: add tests for $FEAT_ID" \
+        --body "Generated with the new-feat workflow" \
+        --allow-empty --json >/dev/null
+    emit:
+      '0': new-feat.commit.tests.done
+      default: new-feat.commit.tests.failed
+    timeout: 60
+
+- id: new-feat.impl
+  driver: shell
+  on: [new-feat.commit.tests.done]
+  emits: [new-feat.impl.done, new-feat.impl.failed]
+  max_fires: 1
+  retry:
+    max_attempts: 2
+    delay: 5000
+    backoff: fixed
+  params:
+    env:
+      NEWFEAT_TOKEN: "${secret.PEREGRIN_TOKEN}"
+      FEAT_ID: "${config.feat_id}"
+      FEAT_DESC: "${config.feat_description}"
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' "$FEAT_ID" | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/${config.worktree_prefix}-${SLUG}"
+      BODY=$(jq -n \
+        --arg cwd "$WT" \
+        --arg id "$FEAT_ID" \
+        --arg desc "$FEAT_DESC" \
+        --arg agent "${config.agent}" \
+        --arg mode "${config.agent_mode}" \
+        --argjson timeout 1800000 \
+        '{cwd:$cwd, agent:$agent, mode:$mode, timeoutMs:$timeout, text:(
+          "We are implementing feature \u0027" + $id + "\u0027: " + $desc + ".\n" +
+          "Working in " + $cwd + " on the current feature branch.\n\n" +
+          "Tests are already in place. Implement the feature to make the tests pass.\n" +
+          "Do not update docs yet unless required for the implementation.\n\n" +
+          "Do NOT commit, push, or open a PR — the campaign owns all git and forge operations."
+        )}')
+      RESP=$(printf 'header = "authorization: Bearer %s"\n' "$NEWFEAT_TOKEN" |
+        curl -sf --max-time 1900 --config - \
+        -X POST "${config.node_url}/api/sessions/run" \
+        -H 'content-type: application/json' -d "$BODY")
+      echo "$RESP" | jq .
+      printf '%s' "$RESP" | jq -e '(.stopReason == "end_turn" or .stopReason == "cancelled") and (.timedOut != true)' >/dev/null
+    emit:
+      '0': new-feat.impl.done
+      default: new-feat.impl.failed
+    timeout: 2000
+
+- id: new-feat.commit-impl
+  driver: shell
+  on: [new-feat.impl.done]
+  emits: [new-feat.commit.impl.done, new-feat.commit.impl.failed]
+  max_fires: 1
+  retry:
+    max_attempts: 2
+    delay: 1000
+    backoff: fixed
+  params:
+    env:
+      FEAT_ID: "${config.feat_id}"
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' "$FEAT_ID" | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/${config.worktree_prefix}-${SLUG}"
+      lasius --root "${config.lasius_root}" vcs commit "$WT" \
+        -m "feat: implement $FEAT_ID" \
+        --body "Generated with the new-feat workflow" \
+        --allow-empty --json >/dev/null
+    emit:
+      '0': new-feat.commit.impl.done
+      default: new-feat.commit.impl.failed
+    timeout: 60
+
+# --- test: run the suite in the worktree -------------------------------
+# Unchanged semantics from test/run.node.yml (already owner-clean —
+# plain shell, no git/gh/agent). Fires once per commit-impl.done and
+# per commit-fix.done, so max_fires is unlimited (bounded upstream:
+# impl once + fix ≤3).
+- id: new-feat.test
+  driver: shell
+  on: [new-feat.commit.impl.done, new-feat.commit.fix.done]
+  emits: [new-feat.test.passed, new-feat.test.failed]
+  max_fires: unlimited
+  retry:
+    max_attempts: 2
+    delay: 1000
+    backoff: fixed
+  params:
+    env:
+      FEAT_ID: "${config.feat_id}"
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' "$FEAT_ID" | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/${config.worktree_prefix}-${SLUG}"
+      cd "$WT"
+      ${config.test_cmd}
+    emit:
+      '0': new-feat.test.passed
+      default: new-feat.test.failed
+    timeout: 600
+
+- id: new-feat.fix
+  driver: shell
+  on: [new-feat.test.failed]
+  emits: [new-feat.fix.done, new-feat.fix.failed]
+  max_fires: 3
+  retry:
+    max_attempts: 2
+    delay: 5000
+    backoff: fixed
+  params:
+    env:
+      NEWFEAT_TOKEN: "${secret.PEREGRIN_TOKEN}"
+      FEAT_ID: "${config.feat_id}"
+      FEAT_DESC: "${config.feat_description}"
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' "$FEAT_ID" | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/${config.worktree_prefix}-${SLUG}"
+      BODY=$(jq -n \
+        --arg cwd "$WT" \
+        --arg id "$FEAT_ID" \
+        --arg desc "$FEAT_DESC" \
+        --arg agent "${config.agent}" \
+        --arg mode "${config.agent_mode}" \
+        --argjson timeout 1800000 \
+        '{cwd:$cwd, agent:$agent, mode:$mode, timeoutMs:$timeout, text:(
+          "We are implementing feature \u0027" + $id + "\u0027: " + $desc + ".\n" +
+          "Working in " + $cwd + " on the current feature branch.\n\n" +
+          "The implementation for feature \u0027" + $id + "\u0027 is failing the test suite (" + $cwd + ").\n" +
+          "Run the tests, fix the implementation, then update docs/adr/" + $id + ".md and any README/docs as needed.\n\n" +
+          "Do NOT commit, push, or open a PR — the campaign owns all git and forge operations."
+        )}')
+      RESP=$(printf 'header = "authorization: Bearer %s"\n' "$NEWFEAT_TOKEN" |
+        curl -sf --max-time 1900 --config - \
+        -X POST "${config.node_url}/api/sessions/run" \
+        -H 'content-type: application/json' -d "$BODY")
+      echo "$RESP" | jq .
+      printf '%s' "$RESP" | jq -e '(.stopReason == "end_turn" or .stopReason == "cancelled") and (.timedOut != true)' >/dev/null
+    emit:
+      '0': new-feat.fix.done
+      default: new-feat.fix.failed
+    timeout: 2000
+
+- id: new-feat.commit-fix
+  driver: shell
+  on: [new-feat.fix.done]
+  emits: [new-feat.commit.fix.done, new-feat.commit.fix.failed]
+  max_fires: unlimited
+  retry:
+    max_attempts: 2
+    delay: 1000
+    backoff: fixed
+  params:
+    env:
+      FEAT_ID: "${config.feat_id}"
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' "$FEAT_ID" | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/${config.worktree_prefix}-${SLUG}"
+      lasius --root "${config.lasius_root}" vcs commit "$WT" \
+        -m "fix: address tests for $FEAT_ID" \
+        --body "Generated with the new-feat workflow" \
+        --allow-empty --json >/dev/null
+    emit:
+      '0': new-feat.commit.fix.done
+      default: new-feat.commit.fix.failed
+    timeout: 60
+
+# --- pr: lasius push + forge pr create -------------------------------
+# Replaces github/pr.node.yml (raw git push + gh pr create). The PR
+# number is re-derived downstream by head branch (forge pr list),
+# never stored — no stdout→state channel.
+- id: new-feat.pr
+  driver: shell
+  on: [new-feat.test.passed]
+  emits: [new-feat.pr.created, new-feat.pr.failed]
+  max_fires: 1
+  retry:
+    max_attempts: 2
+    delay: 1000
+    backoff: fixed
+  params:
+    env:
+      FEAT_ID: "${config.feat_id}"
+      FEAT_DESC: "${config.feat_description}"
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' "$FEAT_ID" | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/${config.worktree_prefix}-${SLUG}"
+      BRANCH="${config.branch_prefix}/$FEAT_ID"
+      lasius --root "${config.lasius_root}" vcs push "$WT" --json >/dev/null
+      PR_BODY=$(printf '## Summary\n\n%s\n\nGenerated with the new-feat workflow' "$FEAT_DESC")
+      lasius --root "${config.lasius_root}" forge pr create "$WT" \
+        --title "feat: $FEAT_ID" \
+        --body "$PR_BODY" \
+        --base "${config.pr_base}" \
+        --head "$BRANCH" \
+        --json
+    emit:
+      '0': new-feat.pr.created
+      default: new-feat.pr.failed
+    timeout: 120
+
+# --- review: sepia agent turn — NOTE: agent self-review --------------
+# Preserves the original semantics: the SAME agent that wrote the
+# code reviews its own PR (no independent reviewer, no GitHub
+# review submission — the verdict is parsed from the session text).
+# The verdict contract: the prompt demands a final line
+# "VERDICT: APPROVE" or "VERDICT: REJECT"; anything else (including
+# transport failure) rejects → rework loop (bounded by rework's
+# max_fires 3, then node.exhausted → abort). The full session text
+# is saved to <worktree_base>/review-<slug>.txt so the rework
+# prompt can quote the feedback (the old flow passed
+# ${event.payload.stdout}; a file is cleaner than embedding the
+# whole JSON response).
+- id: new-feat.review
+  driver: shell
+  on: [new-feat.pr.created, new-feat.commit.rework.done]
+  emits: [new-feat.review.approved, new-feat.review.rejected]
+  max_fires: unlimited
+  retry:
+    max_attempts: 2
+    delay: 5000
+    backoff: fixed
+  params:
+    env:
+      NEWFEAT_TOKEN: "${secret.PEREGRIN_TOKEN}"
+      FEAT_ID: "${config.feat_id}"
+      FEAT_DESC: "${config.feat_description}"
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' "$FEAT_ID" | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/${config.worktree_prefix}-${SLUG}"
+      BRANCH="${config.branch_prefix}/$FEAT_ID"
+      REVIEW_FILE="${config.worktree_base}/review-${SLUG}.txt"
+      BODY=$(jq -n \
+        --arg cwd "$WT" \
+        --arg id "$FEAT_ID" \
+        --arg desc "$FEAT_DESC" \
+        --arg branch "$BRANCH" \
+        --arg base "${config.pr_base}" \
+        --arg root "${config.lasius_root}" \
+        --arg checkout "${config.checkout}" \
+        --arg agent "${config.agent}" \
+        --arg mode "${config.agent_mode}" \
+        --argjson timeout 1800000 \
+        '{cwd:$cwd, agent:$agent, mode:$mode, timeoutMs:$timeout, text:(
+          "Review the pull request for feature \u0027" + $id + "\u0027: " + $desc + ".\n" +
+          "Branch: " + $branch + "\nBase: " + $base + "\nWorking tree: " + $cwd + "\n\n" +
+          "Find the PR with: lasius --root " + $root + " forge pr list " + $checkout + " --state open --json " +
+          "(pick the entry whose head_ref is \u0027" + $branch + "\u0027), then inspect it with " +
+          "lasius --root " + $root + " forge pr view, or review the branch diff directly.\n\n" +
+          "Approve if the implementation and tests look correct; otherwise reject with concrete, actionable feedback.\n" +
+          "End your response with exactly one final line: VERDICT: APPROVE or VERDICT: REJECT."
+        )}')
+      RESP=$(printf 'header = "authorization: Bearer %s"\n' "$NEWFEAT_TOKEN" |
+        curl -sf --max-time 1900 --config - \
+        -X POST "${config.node_url}/api/sessions/run" \
+        -H 'content-type: application/json' -d "$BODY")
+      echo "$RESP" | jq .
+      # Persist the review text for the rework prompt, then gate on
+      # a clean turn AND an explicit APPROVE verdict. REJECT, a
+      # missing verdict, a timeout, or any transport failure all
+      # take the rejected path (fail-safe → bounded rework loop).
+      printf '%s' "$RESP" | jq -r '.text // empty' > "$REVIEW_FILE"
+      printf '%s' "$RESP" | jq -e '
+        (.stopReason == "end_turn" or .stopReason == "cancelled")
+        and (.timedOut != true)
+        and ((.text // "") | contains("VERDICT: APPROVE"))
+        and (((.text // "") | contains("VERDICT: REJECT")) | not)
+      ' >/dev/null
+    emit:
+      '0': new-feat.review.approved
+      default: new-feat.review.rejected
+    timeout: 2000
+
+- id: new-feat.rework
+  driver: shell
+  on: [new-feat.review.rejected]
+  emits: [new-feat.rework.done, new-feat.rework.failed]
+  max_fires: 3
+  retry:
+    max_attempts: 2
+    delay: 5000
+    backoff: fixed
+  params:
+    env:
+      NEWFEAT_TOKEN: "${secret.PEREGRIN_TOKEN}"
+      FEAT_ID: "${config.feat_id}"
+      FEAT_DESC: "${config.feat_description}"
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' "$FEAT_ID" | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/${config.worktree_prefix}-${SLUG}"
+      REVIEW_FILE="${config.worktree_base}/review-${SLUG}.txt"
+      FEEDBACK=$(cat "$REVIEW_FILE" 2>/dev/null || echo "(no review text captured)")
+      BODY=$(jq -n \
+        --arg cwd "$WT" \
+        --arg id "$FEAT_ID" \
+        --arg desc "$FEAT_DESC" \
+        --arg feedback "$FEEDBACK" \
+        --arg agent "${config.agent}" \
+        --arg mode "${config.agent_mode}" \
+        --argjson timeout 1800000 \
+        '{cwd:$cwd, agent:$agent, mode:$mode, timeoutMs:$timeout, text:(
+          "We are implementing feature \u0027" + $id + "\u0027: " + $desc + ".\n" +
+          "Working in " + $cwd + " on the current feature branch.\n\n" +
+          "The PR for feature \u0027" + $id + "\u0027 was rejected.\n\n" +
+          "Review feedback:\n" + $feedback + "\n\n" +
+          "Apply the feedback in " + $cwd + " and update the docs as needed.\n\n" +
+          "Do NOT commit, push, merge, or update the PR — the campaign owns all git and forge operations."
+        )}')
+      RESP=$(printf 'header = "authorization: Bearer %s"\n' "$NEWFEAT_TOKEN" |
+        curl -sf --max-time 1900 --config - \
+        -X POST "${config.node_url}/api/sessions/run" \
+        -H 'content-type: application/json' -d "$BODY")
+      echo "$RESP" | jq .
+      printf '%s' "$RESP" | jq -e '(.stopReason == "end_turn" or .stopReason == "cancelled") and (.timedOut != true)' >/dev/null
+    emit:
+      '0': new-feat.rework.done
+      default: new-feat.rework.failed
+    timeout: 2000
+
+- id: new-feat.commit-rework
+  driver: shell
+  on: [new-feat.rework.done]
+  emits: [new-feat.commit.rework.done, new-feat.commit.rework.failed]
+  max_fires: unlimited
+  retry:
+    max_attempts: 2
+    delay: 1000
+    backoff: fixed
+  params:
+    env:
+      FEAT_ID: "${config.feat_id}"
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' "$FEAT_ID" | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/${config.worktree_prefix}-${SLUG}"
+      lasius --root "${config.lasius_root}" vcs commit "$WT" \
+        -m "chore: apply review feedback for $FEAT_ID" \
+        --body "Generated with the new-feat workflow" \
+        --allow-empty --json >/dev/null
+      # The PR tracks this branch — push so the reviewer and any
+      # human see the rework (old flow relied on the agent pushing;
+      # here it is explicit and owner-clean).
+      lasius --root "${config.lasius_root}" vcs push "$WT" --json >/dev/null
+    emit:
+      '0': new-feat.commit.rework.done
+      default: new-feat.commit.rework.failed
+    timeout: 120
+
+# --- merge: lasius forge pr merge (squash + delete-branch) ------------
+# Replaces github/merge.node.yml (gh pr merge --admin --squash).
+# The PR is resolved by head branch == <branch_prefix>/<feat_id> —
+# deterministic, no stored state. --admin has no lasius equivalent:
+# merge fails honestly if branch protection blocks it (known gap,
+# see README).
+- id: new-feat.merge
+  driver: shell
+  on: [new-feat.review.approved]
+  emits: [new-feat.merged, new-feat.merge.failed]
+  max_fires: 1
+  retry:
+    max_attempts: 2
+    delay: 1000
+    backoff: fixed
+  params:
+    env:
+      FEAT_ID: "${config.feat_id}"
+    cmd: |
+      set -euo pipefail
+      BRANCH="${config.branch_prefix}/$FEAT_ID"
+      JSON=$(lasius --root "${config.lasius_root}" forge pr list "${config.checkout}" --state open --json)
+      NUMBER=$(printf '%s' "$JSON" | jq -r --arg br "$BRANCH" '[.[] | select(.head_ref == $br)] | .[0].number // empty')
+      if [ -z "$NUMBER" ]; then
+        echo "no open PR with head_ref=$BRANCH — nothing to merge"
+        exit 1
+      fi
+      echo "merging PR #$NUMBER ($BRANCH)"
+      lasius --root "${config.lasius_root}" forge pr merge "${config.checkout}" "$NUMBER" --method squash --delete-branch --json
+    emit:
+      '0': new-feat.merged
+      default: new-feat.merge.failed
+    timeout: 120
+
+# --- terminal reporting --------------------------------------------------
+- id: new-feat.report
+  driver: shell
+  on: [new-feat.merged]
+  emits: [new-feat.complete]
+  max_fires: 1
+  params:
+    cmd: |
+      echo "========================================"
+      echo "  NEW-FEAT WORKFLOW COMPLETE"
+      echo "========================================"
+      echo "  Feature: ${config.feat_id}"
+      echo "  Branch: ${config.branch_prefix}/${config.feat_id}"
+      echo "========================================"
+    emit:
+      '0': new-feat.complete
+    timeout: 30
+
+- id: new-feat.abort
+  driver: shell
+  on:
+    [
+      new-feat.worktree.failed,
+      new-feat.adr.failed,
+      new-feat.write-tests.failed,
+      new-feat.commit.tests.failed,
+      new-feat.impl.failed,
+      new-feat.commit.impl.failed,
+      new-feat.fix.failed,
+      new-feat.commit.fix.failed,
+      new-feat.pr.failed,
+      new-feat.rework.failed,
+      new-feat.commit.rework.failed,
+      new-feat.merge.failed,
+      node.exhausted,
+    ]
+  emits: [new-feat.aborted]
+  max_fires: 1
+  params:
+    cmd: |
+      echo "========================================"
+      echo "  NEW-FEAT WORKFLOW ABORTED"
+      echo "========================================"
+      echo "  Event: ${event.type}"
+      echo "========================================"
+    emit:
+      '0': new-feat.aborted
+    timeout: 30

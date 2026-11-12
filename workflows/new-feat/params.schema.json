@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "new-feat params",
+  "type": "object",
+  "properties": {
+    "feat_id": {
+      "type": "string",
+      "description": "Feature id for this run — REQUIRED. Drives the branch name (feat/<id>), the worktree dir (wt-<slug>), docs/adr/<id>.md in agent prompts, and the PR title. The worktree node fails fast when empty.",
+      "default": ""
+    },
+    "feat_description": {
+      "type": "string",
+      "description": "One-paragraph feature description handed to every agent prompt and the PR body.",
+      "default": ""
+    },
+    "checkout": {
+      "type": "string",
+      "description": "Local clone path lasius operates on (any checkout inside a lasius workspace). REQUIRED per run.",
+      "default": ""
+    },
+    "lasius_root": {
+      "type": "string",
+      "description": "lasius workspace root (--root flag); repo args are checkout paths so any lasius.toml workspace works.",
+      "default": "/home/luis/GitHub/9aia/workspace"
+    },
+    "node_url": {
+      "type": "string",
+      "description": "Base URL of `peregrin serve`/`peregrin-node` — agent steps POST /api/sessions/run here; bearer = PEREGRIN_TOKEN.",
+      "default": "http://127.0.0.1:18787"
+    },
+    "worktree_base": {
+      "type": "string",
+      "description": "Feature worktrees land at <worktree_base>/<worktree_prefix>-<slug>; per-run review text at <worktree_base>/review-<slug>.txt.",
+      "default": "$HOME/.local/share/new-feat/worktrees"
+    },
+    "worktree_prefix": {
+      "type": "string",
+      "description": "Worktree dir prefix — final dir is <worktree_prefix>-<slug>.",
+      "default": "wt"
+    },
+    "branch_prefix": {
+      "type": "string",
+      "description": "Branch prefix — the PR head branch is <branch_prefix>/<feat_id>.",
+      "default": "feat"
+    },
+    "pr_base": {
+      "type": "string",
+      "description": "PR base branch — also the worktree --rev (origin/<pr_base>).",
+      "default": "main"
+    },
+    "test_cmd": {
+      "type": "string",
+      "description": "Test command run inside the worktree after impl and after each fix commit. Override per repo (e.g. \"cargo test\", \"pytest\").",
+      "default": "bun test"
+    },
+    "agent": {
+      "type": "string",
+      "description": "sepia agent-config id for all agent turns.",
+      "default": "devin"
+    },
+    "agent_mode": {
+      "type": "string",
+      "description": "ACP session mode applied after create (session/set_mode). REQUIRED for unattended runs — devin's default accept-edits prompts on exec and deadlocks. 'bypass' auto-approves all tools; 'smart' auto-runs model-judged-safe actions; 'accept-edits' only auto-approves edits.",
+      "default": "bypass"
+    }
+  },
+  "additionalProperties": true
+}

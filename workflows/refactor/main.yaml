@@ -1,0 +1,598 @@
+# refactor — spec-driven refactor workflow, migrated to the PL-015
+# ownership boundaries and packaged as a tamias `peregrin-bundle`.
+#
+# Pipeline (ported from libraries/common/refactor):
+#   worktree → analyze (spec + code → PLAN.md) → implement → check →
+#   test → (agent fix + lasius commit) up to 3 times until green
+#   → review → (agent rework + lasius commit) up to 3 times until
+#   approved → docs → lasius commit → push branch → report
+#
+# Boundaries: lasius owns every git call (worktree/commit/push —
+# `lasius --root "${config.lasius_root}" vcs ...`), sepia owns every
+# agent session (POST /api/sessions/run on the node, bearer via curl
+# --config stdin), peregrin owns only event routing. No raw
+# git/gh/agent-driver anywhere in this file.
+#
+# Stateless like pr-heal: the Rust engine has no stdout→state channel
+# (`set_state_from_stdout` is a TS-era param), so every node
+# re-derives the worktree path from config (deterministic per
+# refactor_id) and operator inputs arrive via config keys with
+# ${env(...)} fallbacks — set them as env vars for `campaign run` or
+# in the rendered serve yaml config: block after `tamias deploy`.
+#
+# Run:
+#   REFACTOR_ID=my-change REFACTOR_DESCRIPTION="what and why" \
+#   REFACTOR_SPEC=path/to/spec.md [REFACTOR_CHECK_CMD=...] \
+#   [REFACTOR_TEST_CMD=...] [REFACTOR_CHECKOUT=/path/to/clone] \
+#   peregrin campaign run main.yaml
+name: refactor
+
+annotations:
+  title: Refactor workflow
+  description: >-
+    Spec-driven refactor — lasius worktree, sepia analyze/implement/
+    fix/review/rework/docs sessions, shell check/test gates, pushed
+    branch as the deliverable.
+  author: 9aia
+  tags: [refactor, workflow, agent, lasius, sepia]
+  since: "0.1.0"
+
+# Operator-facing knobs (see params.schema.json + README.md). Values
+# can be set as env vars (REFACTOR_*) at `campaign run` time or in the
+# rendered serve yaml's config: block after `tamias deploy`.
+config:
+  # Local clone lasius operates on — REQUIRED per deployment.
+  checkout: ""
+  # lasius workspace root (--root) — repo args are checkout paths.
+  lasius_root: "/home/luis/GitHub/9aia/workspace"
+  # Worktrees land at <worktree_base>/wt-<slug(refactor_id)>.
+  worktree_base: "$HOME/.local/share/refactor/worktrees"
+  # Base ref the worktree branches from (origin/<base>).
+  base: "main"
+  # The refactor under work — REQUIRED. Env: REFACTOR_ID.
+  refactor_id: '${env("REFACTOR_ID")}'
+  # One-line description woven into every agent prompt.
+  # Env: REFACTOR_DESCRIPTION.
+  refactor_description: '${env("REFACTOR_DESCRIPTION")}'
+  # Spec file path the agents read (relative to the worktree or
+  # absolute). Env: REFACTOR_SPEC.
+  spec: '${env("REFACTOR_SPEC")}'
+  # Gate commands run inside the worktree.
+  check_cmd: '${env("REFACTOR_CHECK_CMD","cargo xtask check")}'
+  test_cmd: '${env("REFACTOR_TEST_CMD","cargo xtask test")}'
+  # sepia agent-config id + ACP session mode for agent nodes.
+  agent: '${env("REFACTOR_AGENT","devin")}'
+  # REQUIRED for unattended runs — devin's default accept-edits
+  # prompts on exec and deadlocks. "bypass" auto-approves all tools.
+  agent_mode: '${env("REFACTOR_AGENT_MODE","bypass")}'
+  # Base URL of `peregrin serve` — sessions plane. Bearer =
+  # PEREGRIN_TOKEN (capabilities.secrets below).
+  node_url: "http://127.0.0.1:18787"
+
+# Env names the config: block reads via ${env(...)} plus the session
+# bearer. Under strict these are the only env reads permitted.
+capabilities:
+  env:
+    - REFACTOR_ID
+    - REFACTOR_DESCRIPTION
+    - REFACTOR_SPEC
+    - REFACTOR_CHECK_CMD
+    - REFACTOR_TEST_CMD
+    - REFACTOR_AGENT
+    - REFACTOR_AGENT_MODE
+  secrets:
+    - PEREGRIN_TOKEN
+
+events:
+  - type: start
+  - type: refactor.worktree.ready
+  - type: refactor.worktree.failed
+  - type: refactor.analyze.done
+  - type: refactor.analyze.failed
+  - type: refactor.impl.done
+  - type: refactor.impl.failed
+  - type: refactor.check.passed
+  - type: refactor.check.failed
+  - type: refactor.test.passed
+  - type: refactor.test.failed
+  - type: refactor.fix.done
+  - type: refactor.fix.failed
+  - type: refactor.commit.fix.done
+  - type: refactor.commit.fix.failed
+  - type: refactor.review.approved
+  - type: refactor.review.rejected
+  - type: refactor.review.failed
+  - type: refactor.rework.done
+  - type: refactor.rework.failed
+  - type: refactor.commit.rework.done
+  - type: refactor.commit.rework.failed
+  - type: refactor.docs.done
+  - type: refactor.docs.failed
+  - type: refactor.commit.docs.done
+  - type: refactor.commit.docs.failed
+  - type: refactor.pushed
+  - type: refactor.push.failed
+  - type: refactor.complete
+  - type: refactor.aborted
+  - type: node.exhausted
+
+nodes:
+# --- worktree: lasius worktree add --branch refactor/<id> ---------------
+# Replaces libraries/git/worktree.node.yml. Fetches origin, removes any
+# stale worktree at the deterministic path, then creates the branch
+# from origin/<config.base>. No `git branch -D` cleanup — lasius has
+# no branch-delete verb yet (README known gap).
+- id: refactor.worktree
+  driver: shell
+  on: [start]
+  emits: [refactor.worktree.ready, refactor.worktree.failed]
+  max_fires: 1
+  retry:
+    max_attempts: 2
+    delay: 1000
+    backoff: fixed
+  params:
+    cmd: |
+      set -euo pipefail
+      ID='${config.refactor_id}'
+      [ -n "$ID" ] || { echo "refactor_id is empty — set REFACTOR_ID or config.refactor_id"; exit 1; }
+      [ -n '${config.checkout}' ] || { echo "checkout is empty — set REFACTOR_CHECKOUT or config.checkout"; exit 1; }
+      SLUG=$(printf '%s' "$ID" | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/wt-${SLUG}"
+      BRANCH="refactor/${ID}"
+      mkdir -p "${config.worktree_base}"
+      lasius --root "${config.lasius_root}" vcs fetch "${config.checkout}" --json >/dev/null
+      lasius --root "${config.lasius_root}" vcs worktree remove "${config.checkout}" --dir "$WT" --json >/dev/null 2>&1 || true
+      lasius --root "${config.lasius_root}" vcs worktree add "${config.checkout}" --dir "$WT" --branch "$BRANCH" --rev "origin/${config.base}" --json >/dev/null
+      echo "worktree ready: $WT (branch $BRANCH, base origin/${config.base})"
+    emit:
+      '0': refactor.worktree.ready
+      default: refactor.worktree.failed
+    timeout: 120
+
+# --- analyze: sepia session — spec + code → PLAN.md --------------------
+# Replaces libraries/agent/base.node.yml (driver: agent). shell+curl so
+# the bearer rides curl --config stdin, never argv. `mode` is required
+# for unattended turns (agent_mode, default bypass).
+- id: refactor.analyze
+  driver: shell
+  on: [refactor.worktree.ready]
+  emits: [refactor.analyze.done, refactor.analyze.failed]
+  max_fires: 1
+  retry:
+    max_attempts: 2
+    delay: 5000
+    backoff: fixed
+  params:
+    env:
+      REFACTOR_TOKEN: "${secret.PEREGRIN_TOKEN}"
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' '${config.refactor_id}' | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/wt-${SLUG}"
+      BODY=$(jq -n \
+        --arg cwd "$WT" \
+        --arg id '${config.refactor_id}' \
+        --arg desc '${config.refactor_description}' \
+        --arg spec '${config.spec}' \
+        --arg base '${config.base}' \
+        --arg agent "${config.agent}" \
+        --arg mode "${config.agent_mode}" \
+        --argjson timeout 660000 \
+        '{cwd:$cwd, agent:$agent, mode:$mode, timeoutMs:$timeout, text:(
+          "Refactor task: \($id) — \($desc).\n\n" +
+          "Spec: \($spec)\n" +
+          "Worktree: \($cwd) (branch refactor/\($id), based on origin/\($base)).\n\n" +
+          "Read the spec and the relevant code. Write the implementation plan into PLAN.md in the worktree root: files to touch, design decisions, risks, test coverage. Do NOT change code. Do NOT run git, lasius, or forge commands."
+        )}')
+      RESP=$(printf 'header = "authorization: Bearer %s"\n' "$REFACTOR_TOKEN" |
+        curl -sf --max-time 700 --config - \
+        -X POST "${config.node_url}/api/sessions/run" \
+        -H 'content-type: application/json' -d "$BODY")
+      echo "$RESP" | jq .
+      printf '%s' "$RESP" | jq -e '(.stopReason == "end_turn" or .stopReason == "cancelled") and (.timedOut != true)' >/dev/null
+    emit:
+      '0': refactor.analyze.done
+      default: refactor.analyze.failed
+    timeout: 720
+
+# --- impl: sepia session — implement per spec + PLAN.md ----------------
+- id: refactor.impl
+  driver: shell
+  on: [refactor.analyze.done]
+  emits: [refactor.impl.done, refactor.impl.failed]
+  max_fires: 1
+  retry:
+    max_attempts: 2
+    delay: 5000
+    backoff: fixed
+  params:
+    env:
+      REFACTOR_TOKEN: "${secret.PEREGRIN_TOKEN}"
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' '${config.refactor_id}' | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/wt-${SLUG}"
+      BODY=$(jq -n \
+        --arg cwd "$WT" \
+        --arg id '${config.refactor_id}' \
+        --arg desc '${config.refactor_description}' \
+        --arg spec '${config.spec}' \
+        --arg agent "${config.agent}" \
+        --arg mode "${config.agent_mode}" \
+        --argjson timeout 1260000 \
+        '{cwd:$cwd, agent:$agent, mode:$mode, timeoutMs:$timeout, text:(
+          "Refactor task: \($id) — \($desc).\n\n" +
+          "Spec: \($spec)\n" +
+          "Worktree: \($cwd). PLAN.md in the worktree root holds the approved plan.\n\n" +
+          "Implement the refactor per the spec and PLAN.md. Update tests for the new semantics and add coverage for them. Do NOT commit — the check/test gate runs next. Do NOT run git, lasius, or forge commands; leave the changes in the working tree."
+        )}')
+      RESP=$(printf 'header = "authorization: Bearer %s"\n' "$REFACTOR_TOKEN" |
+        curl -sf --max-time 1300 --config - \
+        -X POST "${config.node_url}/api/sessions/run" \
+        -H 'content-type: application/json' -d "$BODY")
+      echo "$RESP" | jq .
+      printf '%s' "$RESP" | jq -e '(.stopReason == "end_turn" or .stopReason == "cancelled") and (.timedOut != true)' >/dev/null
+    emit:
+      '0': refactor.impl.done
+      default: refactor.impl.failed
+    timeout: 1320
+
+# --- check: check_cmd in the worktree ----------------------------------
+# Replaces libraries/test/run.node.yml pattern for the lint/typecheck
+# gate. max_fires 4 bounds the fix loop: initial run + up to 3
+# fix→commit→recheck cycles.
+- id: refactor.check
+  driver: shell
+  on: [refactor.impl.done, refactor.commit.fix.done]
+  emits: [refactor.check.passed, refactor.check.failed]
+  max_fires: 4
+  params:
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' '${config.refactor_id}' | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/wt-${SLUG}"
+      cd "$WT"
+      ${config.check_cmd}
+    emit:
+      '0': refactor.check.passed
+      default: refactor.check.failed
+    timeout: 600
+
+# --- test: test_cmd in the worktree -------------------------------------
+- id: refactor.test
+  driver: shell
+  on: [refactor.check.passed]
+  emits: [refactor.test.passed, refactor.test.failed]
+  max_fires: 4
+  params:
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' '${config.refactor_id}' | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/wt-${SLUG}"
+      cd "$WT"
+      ${config.test_cmd}
+    emit:
+      '0': refactor.test.passed
+      default: refactor.test.failed
+    timeout: 600
+
+# --- fix: sepia session — repair gate failures (max 3) ------------------
+# Failure output rides params.env → jq --arg, keeping arbitrary stdout
+# out of the shell script body.
+- id: refactor.fix
+  driver: shell
+  on: [refactor.check.failed, refactor.test.failed]
+  emits: [refactor.fix.done, refactor.fix.failed]
+  max_fires: 3
+  retry:
+    max_attempts: 2
+    delay: 5000
+    backoff: fixed
+  params:
+    env:
+      REFACTOR_TOKEN: "${secret.PEREGRIN_TOKEN}"
+      FAIL_OUTPUT: "${event.payload.stdout}"
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' '${config.refactor_id}' | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/wt-${SLUG}"
+      BODY=$(jq -n \
+        --arg cwd "$WT" \
+        --arg id '${config.refactor_id}' \
+        --arg desc '${config.refactor_description}' \
+        --arg fail "$FAIL_OUTPUT" \
+        --arg agent "${config.agent}" \
+        --arg mode "${config.agent_mode}" \
+        --argjson timeout 960000 \
+        '{cwd:$cwd, agent:$agent, mode:$mode, timeoutMs:$timeout, text:(
+          "The refactor \"\($id)\" (\($desc)) is failing check or tests.\n\n" +
+          "Worktree: \($cwd)\n\n" +
+          "Failure output:\n\n\($fail)\n\n" +
+          "Fix the root cause so the gate passes. Do NOT commit — the campaign commits after you finish. Do NOT run git, lasius, or forge commands."
+        )}')
+      RESP=$(printf 'header = "authorization: Bearer %s"\n' "$REFACTOR_TOKEN" |
+        curl -sf --max-time 1000 --config - \
+        -X POST "${config.node_url}/api/sessions/run" \
+        -H 'content-type: application/json' -d "$BODY")
+      echo "$RESP" | jq .
+      printf '%s' "$RESP" | jq -e '(.stopReason == "end_turn" or .stopReason == "cancelled") and (.timedOut != true)' >/dev/null
+    emit:
+      '0': refactor.fix.done
+      default: refactor.fix.failed
+    timeout: 1020
+
+# --- commit-fix: lasius vcs commit after a fix pass ---------------------
+# Replaces libraries/git/commit.node.yml. No --allow-empty: a fix that
+# produced no diff fails honestly instead of looping the gate.
+- id: refactor.commit-fix
+  driver: shell
+  on: [refactor.fix.done]
+  emits: [refactor.commit.fix.done, refactor.commit.fix.failed]
+  max_fires: 3
+  params:
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' '${config.refactor_id}' | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/wt-${SLUG}"
+      lasius --root "${config.lasius_root}" vcs commit "$WT" \
+        -m "fix: refactor ${config.refactor_id} — gate failures" \
+        --body "Generated with the refactor workflow bundle" --json
+    emit:
+      '0': refactor.commit.fix.done
+      default: refactor.commit.fix.failed
+    timeout: 60
+
+# --- review: sepia session — verdict APPROVED/REJECTED ------------------
+# The agent must end with a `VERDICT: APPROVED|REJECTED` line; the node
+# prints the agent text as its stdout so the rework node's
+# ${event.payload.stdout} carries the review feedback verbatim.
+- id: refactor.review
+  driver: shell
+  on: [refactor.test.passed, refactor.commit.rework.done]
+  emits: [refactor.review.approved, refactor.review.rejected, refactor.review.failed]
+  # 1 initial + up to 3 rework cycles + slack.
+  max_fires: 6
+  retry:
+    max_attempts: 2
+    delay: 5000
+    backoff: fixed
+  params:
+    env:
+      REFACTOR_TOKEN: "${secret.PEREGRIN_TOKEN}"
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' '${config.refactor_id}' | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/wt-${SLUG}"
+      BODY=$(jq -n \
+        --arg cwd "$WT" \
+        --arg id '${config.refactor_id}' \
+        --arg desc '${config.refactor_description}' \
+        --arg spec '${config.spec}' \
+        --arg base '${config.base}' \
+        --arg agent "${config.agent}" \
+        --arg mode "${config.agent_mode}" \
+        --argjson timeout 660000 \
+        '{cwd:$cwd, agent:$agent, mode:$mode, timeoutMs:$timeout, text:(
+          "Review the refactor \"\($id)\": \($desc).\n\n" +
+          "Branch: refactor/\($id) in \($cwd)\n" +
+          "Base: origin/\($base)\n" +
+          "Spec: \($spec)\n\n" +
+          "Approve if the implementation matches the spec, checks and tests are green, and repo conventions hold. Otherwise reject with actionable feedback. " +
+          "End your response with a final line exactly \"VERDICT: APPROVED\" or \"VERDICT: REJECTED\"."
+        )}')
+      RESP=$(printf 'header = "authorization: Bearer %s"\n' "$REFACTOR_TOKEN" |
+        curl -sf --max-time 700 --config - \
+        -X POST "${config.node_url}/api/sessions/run" \
+        -H 'content-type: application/json' -d "$BODY")
+      echo "$RESP" | jq .
+      printf '%s' "$RESP" | jq -e '(.stopReason == "end_turn" or .stopReason == "cancelled") and (.timedOut != true)' >/dev/null || exit 1
+      # Agent text becomes this node's stdout → review.rejected payload
+      # for the rework node.
+      TEXT=$(printf '%s' "$RESP" | jq -r '.text // ""')
+      printf '%s\n' "$TEXT"
+      VERDICT=$(printf '%s\n' "$TEXT" | grep -oE 'VERDICT: (APPROVED|REJECTED)' | tail -1)
+      case "$VERDICT" in
+        "VERDICT: APPROVED") exit 0 ;;
+        "VERDICT: REJECTED") exit 3 ;;
+        *) echo "no verdict line parsed from agent text"; exit 1 ;;
+      esac
+    emit:
+      '0': refactor.review.approved
+      '3': refactor.review.rejected
+      default: refactor.review.failed
+    timeout: 720
+
+# --- rework: sepia session — apply review feedback (max 3) --------------
+- id: refactor.rework
+  driver: shell
+  on: [refactor.review.rejected]
+  emits: [refactor.rework.done, refactor.rework.failed]
+  max_fires: 3
+  retry:
+    max_attempts: 2
+    delay: 5000
+    backoff: fixed
+  params:
+    env:
+      REFACTOR_TOKEN: "${secret.PEREGRIN_TOKEN}"
+      REVIEW_FEEDBACK: "${event.payload.stdout}"
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' '${config.refactor_id}' | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/wt-${SLUG}"
+      BODY=$(jq -n \
+        --arg cwd "$WT" \
+        --arg id '${config.refactor_id}' \
+        --arg desc '${config.refactor_description}' \
+        --arg fb "$REVIEW_FEEDBACK" \
+        --arg agent "${config.agent}" \
+        --arg mode "${config.agent_mode}" \
+        --argjson timeout 960000 \
+        '{cwd:$cwd, agent:$agent, mode:$mode, timeoutMs:$timeout, text:(
+          "The refactor \"\($id)\" (\($desc)) was rejected on review.\n\n" +
+          "Worktree: \($cwd)\n\n" +
+          "Review feedback:\n\n\($fb)\n\n" +
+          "Apply the feedback. Do NOT commit — the campaign commits after you finish. Do NOT run git, lasius, or forge commands."
+        )}')
+      RESP=$(printf 'header = "authorization: Bearer %s"\n' "$REFACTOR_TOKEN" |
+        curl -sf --max-time 1000 --config - \
+        -X POST "${config.node_url}/api/sessions/run" \
+        -H 'content-type: application/json' -d "$BODY")
+      echo "$RESP" | jq .
+      printf '%s' "$RESP" | jq -e '(.stopReason == "end_turn" or .stopReason == "cancelled") and (.timedOut != true)' >/dev/null
+    emit:
+      '0': refactor.rework.done
+      default: refactor.rework.failed
+    timeout: 1020
+
+# --- commit-rework: lasius vcs commit after a rework pass ----------------
+# On commit.rework.done the flow returns to review (matching the
+# original semantics — rework does not re-run the check/test gates).
+- id: refactor.commit-rework
+  driver: shell
+  on: [refactor.rework.done]
+  emits: [refactor.commit.rework.done, refactor.commit.rework.failed]
+  max_fires: 3
+  params:
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' '${config.refactor_id}' | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/wt-${SLUG}"
+      lasius --root "${config.lasius_root}" vcs commit "$WT" \
+        -m "chore: apply review feedback for ${config.refactor_id}" \
+        --body "Generated with the refactor workflow bundle" --json
+    emit:
+      '0': refactor.commit.rework.done
+      default: refactor.commit.rework.failed
+    timeout: 60
+
+# --- docs: sepia session — update docs, no commit -----------------------
+# The campaign owns the commit (docs node no longer self-commits).
+- id: refactor.docs
+  driver: shell
+  on: [refactor.review.approved]
+  emits: [refactor.docs.done, refactor.docs.failed]
+  max_fires: 1
+  retry:
+    max_attempts: 2
+    delay: 5000
+    backoff: fixed
+  params:
+    env:
+      REFACTOR_TOKEN: "${secret.PEREGRIN_TOKEN}"
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' '${config.refactor_id}' | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/wt-${SLUG}"
+      BODY=$(jq -n \
+        --arg cwd "$WT" \
+        --arg id '${config.refactor_id}' \
+        --arg desc '${config.refactor_description}' \
+        --arg agent "${config.agent}" \
+        --arg mode "${config.agent_mode}" \
+        --argjson timeout 660000 \
+        '{cwd:$cwd, agent:$agent, mode:$mode, timeoutMs:$timeout, text:(
+          "The refactor \"\($id)\" (\($desc)) was approved. Update docs to match it: AGENTS.md awareness blocks, skills, README/docs references that describe the old behavior, and the spec item status if it lives in a myco ledger. " +
+          "Work in \($cwd). Do NOT commit — the campaign commits with message docs: refactor \($id). Do NOT run git, lasius, or forge commands."
+        )}')
+      RESP=$(printf 'header = "authorization: Bearer %s"\n' "$REFACTOR_TOKEN" |
+        curl -sf --max-time 700 --config - \
+        -X POST "${config.node_url}/api/sessions/run" \
+        -H 'content-type: application/json' -d "$BODY")
+      echo "$RESP" | jq .
+      printf '%s' "$RESP" | jq -e '(.stopReason == "end_turn" or .stopReason == "cancelled") and (.timedOut != true)' >/dev/null
+    emit:
+      '0': refactor.docs.done
+      default: refactor.docs.failed
+    timeout: 720
+
+# --- commit-docs: lasius vcs commit the docs pass ------------------------
+- id: refactor.commit-docs
+  driver: shell
+  on: [refactor.docs.done]
+  emits: [refactor.commit.docs.done, refactor.commit.docs.failed]
+  max_fires: 1
+  params:
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' '${config.refactor_id}' | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/wt-${SLUG}"
+      lasius --root "${config.lasius_root}" vcs commit "$WT" \
+        -m "docs: refactor ${config.refactor_id}" \
+        --body "Generated with the refactor workflow bundle" --json
+    emit:
+      '0': refactor.commit.docs.done
+      default: refactor.commit.docs.failed
+    timeout: 60
+
+# --- push: publish the branch — the deliverable --------------------------
+# The original workflow claimed "the pushed branch is the deliverable"
+# but never pushed; this node makes that true. Explicit
+# HEAD:refs/heads/<branch> refspec — the worktree branch has no
+# upstream. No PR/merge: review is a human/sturn call (org rule).
+- id: refactor.push
+  driver: shell
+  on: [refactor.commit.docs.done]
+  emits: [refactor.pushed, refactor.push.failed]
+  max_fires: 1
+  params:
+    cmd: |
+      set -euo pipefail
+      SLUG=$(printf '%s' '${config.refactor_id}' | tr '/' '-' | tr ' ' '-')
+      WT="${config.worktree_base}/wt-${SLUG}"
+      lasius --root "${config.lasius_root}" vcs push "$WT" \
+        --branch "HEAD:refs/heads/refactor/${config.refactor_id}" --json
+    emit:
+      '0': refactor.pushed
+      default: refactor.push.failed
+    timeout: 120
+
+# --- report: success banner ----------------------------------------------
+- id: refactor.report
+  driver: shell
+  on: [refactor.pushed]
+  emits: [refactor.complete]
+  max_fires: 1
+  params:
+    cmd: |
+      echo "========================================"
+      echo "  REFACTOR COMPLETE"
+      echo "========================================"
+      echo "  Branch: refactor/${config.refactor_id}"
+      echo "  Worktree: ${config.worktree_base}/wt-$(printf '%s' '${config.refactor_id}' | tr '/' '-' | tr ' ' '-')"
+      echo "========================================"
+    emit:
+      '0': refactor.complete
+    timeout: 30
+
+# --- abort: hard-failure banner ------------------------------------------
+- id: refactor.abort
+  driver: shell
+  on:
+    [
+      refactor.worktree.failed,
+      refactor.analyze.failed,
+      refactor.impl.failed,
+      refactor.fix.failed,
+      refactor.commit.fix.failed,
+      refactor.review.failed,
+      refactor.rework.failed,
+      refactor.commit.rework.failed,
+      refactor.docs.failed,
+      refactor.commit.docs.failed,
+      refactor.push.failed,
+      node.exhausted,
+    ]
+  emits: [refactor.aborted]
+  max_fires: 1
+  params:
+    cmd: |
+      echo "========================================"
+      echo "  REFACTOR ABORTED"
+      echo "========================================"
+      echo "  Event: ${event.type}"
+      echo "========================================"
+    emit:
+      '0': refactor.aborted
+    timeout: 30

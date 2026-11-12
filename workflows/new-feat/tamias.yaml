@@ -1,0 +1,45 @@
+# new-feat — manually-triggered feature pipeline: lasius worktree →
+# sepia agent turns (ADR → tests → impl → fix/rework loops) → lasius
+# commits/push/PR → sepia self-review → lasius squash-merge.
+# Tamias bundle (`type: peregrin-bundle`); migrated from
+# repos/peregrin/libraries/common/new-feat (PL-015 ownership
+# boundaries: lasius = git/forge, sepia = agent, peregrin = routing).
+#
+# Boundaries: lasius owns every git/forge call, sepia owns the agent
+# sessions (POST /api/sessions/run → sessions.prompt_wait),
+# peregrin owns only event routing, tamias distributes.
+name: new-feat
+version: "0.1.0"
+type: peregrin-bundle
+description: >-
+  Feature implementation pipeline — worktree → ADR → tests → impl →
+  test/fix loop (≤3) → PR → agent review → rework loop (≤3) →
+  squash merge. All git/forge via lasius, all agent turns via sepia
+  /api/sessions/run. Manually triggered (on: start); per-run knobs
+  (feat_id, feat_description, checkout) via config.
+
+provider:
+  # SHARED provider identity — same as pr-heal/ci-gate/ci-ingress/
+  # docs-deploy: every peregrin-bundle renders services into the ONE
+  # peregrin-campaign.service hosting ~/.config/peregrin/serve/*.yaml
+  # on the shared webhook listener. Keep `exec` identical.
+  name: peregrin
+  services:
+    - name: campaign
+      exec: >-
+        ~/.local/bin/peregrin campaign serve ~/.config/peregrin/serve
+        --listen 127.0.0.1:29173 --path /hook
+        --history-dir ~/.local/share/peregrin/serve-history
+        --queue-store-dir ~/.local/share/peregrin/serve-queues
+      env_file: "~/.config/peregrin/env"
+      workdir: "~"
+      restart: on-failure
+  ingress:
+    # Advisory only — new-feat has NO webhook ingress (manual
+    # trigger). Kept identical to the other peregrin bundles because
+    # the provider renders one shared service; hooks[] stays empty.
+    - public_url: https://tamias.luisfuturist.com
+      listen: 127.0.0.1:29173
+      path: /hook
+      hooks: []
+  verbs: [run, logs]

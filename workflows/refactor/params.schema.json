@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "refactor params",
+  "type": "object",
+  "properties": {
+    "checkout": {
+      "type": "string",
+      "description": "Local clone path lasius operates on (any checkout under the lasius workspace's repos dir or an absolute path). REQUIRED per deployment — set REFACTOR_CHECKOUT or this key.",
+      "default": ""
+    },
+    "lasius_root": {
+      "type": "string",
+      "description": "lasius workspace root (--root flag); repo args are checkout paths so any lasius.toml workspace works.",
+      "default": "/home/luis/GitHub/9aia/workspace"
+    },
+    "worktree_base": {
+      "type": "string",
+      "description": "Refactor worktrees land at <worktree_base>/wt-<slug(refactor_id)>; the path is re-derived by every node.",
+      "default": "$HOME/.local/share/refactor/worktrees"
+    },
+    "base": {
+      "type": "string",
+      "description": "Base branch the worktree branches from — the worktree is created at origin/<base>.",
+      "default": "main"
+    },
+    "refactor_id": {
+      "type": "string",
+      "description": "Identifier for the refactor — becomes the branch suffix (refactor/<id>) and the worktree slug. REQUIRED. Env fallback: REFACTOR_ID.",
+      "default": ""
+    },
+    "refactor_description": {
+      "type": "string",
+      "description": "One-line description woven into every agent prompt. Env fallback: REFACTOR_DESCRIPTION.",
+      "default": ""
+    },
+    "spec": {
+      "type": "string",
+      "description": "Path to the spec file the analyze/impl/review agents read (relative to the worktree or absolute). Env fallback: REFACTOR_SPEC.",
+      "default": ""
+    },
+    "check_cmd": {
+      "type": "string",
+      "description": "Lint/typecheck command run in the worktree after impl and after each fix. Env fallback: REFACTOR_CHECK_CMD.",
+      "default": "cargo xtask check"
+    },
+    "test_cmd": {
+      "type": "string",
+      "description": "Test command run in the worktree after check passes. Env fallback: REFACTOR_TEST_CMD.",
+      "default": "cargo xtask test"
+    },
+    "agent": {
+      "type": "string",
+      "description": "sepia agent-config id for the analyze/impl/fix/review/rework/docs sessions. Env fallback: REFACTOR_AGENT.",
+      "default": "devin"
+    },
+    "agent_mode": {
+      "type": "string",
+      "description": "ACP session mode applied after create (session/set_mode). REQUIRED for unattended runs — devin's default accept-edits prompts on exec and deadlocks. 'bypass' auto-approves all tools; 'smart' is the safer middle ground. Env fallback: REFACTOR_AGENT_MODE.",
+      "default": "bypass"
+    },
+    "node_url": {
+      "type": "string",
+      "description": "Base URL of `peregrin serve` (sessions plane). Agent nodes POST /api/sessions/run here; bearer = PEREGRIN_TOKEN.",
+      "default": "http://127.0.0.1:18787"
+    }
+  },
+  "additionalProperties": true
+}
