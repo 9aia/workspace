@@ -4,6 +4,13 @@
 # `docs:deploy` (vitepress build → `gh-pages`) → GitHub commit status
 # under `docs/deploy`.
 #
+# Boundaries: lasius owns every git/forge call (`lasius vcs fetch` /
+# `worktree add|remove` for the checkouts, `lasius forge status
+# create` for the commit statuses, `lasius add` for clone-if-missing);
+# the deploy command itself is the repo's own `docs:deploy` script.
+# Peregrin owns only event routing — no raw git/gh anywhere in this
+# file.
+#
 # Unlike `libraries/ci-gate` this bundle DOES ship its ingress node:
 # v1 watches a fixed repo set whose webhook-secret env names follow
 # the existing `BUPHA_WH_<OWNER>_<REPO>` convention (names only —
@@ -19,34 +26,45 @@
 # `docs` orphan branch IS the site checkout) plus the gen-dependent
 # repos (myco/tamias/cuora/pavo/hypha/sturn/kuda/mimus/bupha) whose
 # `docs:deploy` runs `docs:gen`/`docs:api` steps that `cd ..` into
-# the main checkout for `cargo run`/`cargo doc`. Those git nodes use
-# `params.extra_worktrees` (PL-009 D6): the docs-branch worktree lands
-# at `<run>/docs` and a second worktree of `config.main_ref` at
-# `<run>`, so the gen steps see the same layout as a dev checkout.
-# 9aia.github.io is the odd one out: the site lives on `main` (no
-# `docs` branch), so its triplet subscribes `refs/heads/main` —
-# self-contained, no extra_worktrees. Its Pages source must be the
-# `gh-pages` branch (was `actions/deploy-pages` artifact deploy —
-# operator switches Pages source once; the built output is identical).
+# the main checkout for `cargo run`/`cargo doc`. Those pipelines use
+# the D6 dual-checkout layout: the docs-branch worktree lands at
+# `<run>/docs` and a second worktree of `config.main_ref` at `<run>`,
+# so the gen steps see the same layout as a dev checkout. 9aia.github.io
+# is the odd one out: the site lives on `main` (no `docs` branch), so
+# its triplet subscribes `refs/heads/main` — self-contained, single
+# worktree. Its Pages source must be the `gh-pages` branch (was
+# `actions/deploy-pages` artifact deploy — operator switches Pages
+# source once; the built output is identical).
+#
+# Event contract: deploy nodes emit `docs.<repo>.done.<sha>` /
+# `docs.<repo>.failed.<sha>` (the sha rides the type, pr-heal style —
+# shell events carry no payload.sha for the status nodes to read).
+# Verdict statuses map `*.done.*` → success, `*.failed.*` → failure.
 name: docs-deploy
 
 # Operator-facing knobs (see params.schema.json + README.md).
 config:
   worktree_base: "~/.local/share/peregrin/worktrees"
-  token_env: "BUPHA_TOKEN"          # NAME of the forge-token secret — never a value
-  timeout: 600                      # inner shell cap (seconds; driver caps at 600)
+  # lasius workspace root (`--root`) — repo args are clone names
+  # resolved under <lasius_root>/<repos_dir>/<name>. Per-deployment;
+  # the org workspace is the natural choice (same as pr-heal).
+  lasius_root: "/home/luis/GitHub/9aia/workspace"
+  token_env: "BUPHA_TOKEN"          # secret NAME — injected into node env as BUPHA_TOKEN + GH_TOKEN
+  timeout: 600                      # inner deploy cap (seconds)
   context: "docs/deploy"            # commit-status context on the pushed repo
-  main_ref: "refs/heads/main"        # ref the gen-dependent nodes check out at <run>
+  # Rev the gen-dependent nodes' second worktree checks out at <run>.
+  # Remote-tracking (`origin/main`) so it reflects the last
+  # `lasius vcs fetch` — a local `refs/heads/main` can lag.
+  main_ref: "origin/main"
   # The deploy command, run at the worktree root (the docs branch
   # root). `bun install` first — a fresh worktree has no node_modules
   # (`--frozen-lockfile` when bun.lock is committed, plain install as
   # fallback). gh-pages pushes the `gh-pages` branch: the worktree's
-  # `origin` is the clone_url the webhook reported, and the
-  # env-scoped `credential.helper` + author/committer env give the
-  # push auth and a commit identity WITHOUT writing the token into
-  # any git config (the bare clone cache under worktree_base/.repos
-  # stays clean). `$BUPHA_TOKEN` is the ambient env name — it must
-  # match `token_env` above.
+  # `origin` is the clone's own remote, and the env-scoped
+  # `credential.helper` + author/committer env give the push auth and
+  # a commit identity WITHOUT writing the token into any git config.
+  # `$BUPHA_TOKEN` is injected via the node's `env:` (secret.BUPHA_TOKEN)
+  # — it must match `token_env` above.
   cmd: >-
     bash -lc 'set -e;
     bun install --frozen-lockfile 2>/dev/null || bun install;
@@ -68,8 +86,10 @@ supersede:
   mode: latest-wins
   cancel_running: true
 
-# Secret NAMES the drivers may resolve — the webhook HMAC secret per
-# watched repo plus the forge token. Values never appear here.
+# Secret NAMES the nodes may resolve — the webhook HMAC secret per
+# watched repo plus the forge token (injected as BUPHA_TOKEN for the
+# gh-pages push and GH_TOKEN for `gh api` inside lasius forge).
+# Values never appear here.
 capabilities:
   secrets:
     - BUPHA_TOKEN
@@ -90,7 +110,7 @@ capabilities:
 annotations:
   title: Docs deploy
   description: >-
-    Push to refs/heads/docs → detached worktree at sha → bun install +
+    Push to refs/heads/docs → lasius worktree at sha → bun install +
     docs:deploy (vitepress build → gh-pages) → docs/deploy commit
     status. The GHA deploy.yml replacement as a campaign.
   since: "0.1.0"
@@ -154,608 +174,1506 @@ nodes:
         default: "route.unmatched"
 
   # --- per-repo deploy pipelines -------------------------------------
-  # Each: git worktree → inner shell → pending + verdict statuses.
+  # Each: lasius fetch + worktree(s) at the pushed sha → deploy cmd →
+  # pending + verdict statuses via `lasius forge status create`.
   # `on:` pins repo AND refs/heads/docs, so main-branch pushes on the
   # same repos (ci-gate's territory) never fire these.
 
   - id: docs.9aia-sepia
-    driver: git
+    driver: shell
     on: [push.9aia/sepia.refs/heads/docs.**.*]
     max_fires: unlimited
-    emits: [docs.9aia-sepia.done, docs.9aia-sepia.failed]
+    emits: [docs.9aia-sepia.done.*, docs.9aia-sepia.failed.*]
     params:
-      url: "${event.match.1}"
-      sha: "${event.match.2}"
-      base: "${config.worktree_base}"
-      token_env: "${config.token_env}"
-      inner:
-        driver: shell
-        params:
-          cmd: "${config.cmd}"
-          timeout: "${config.timeout:-600}"
+      # Node cap covers lasius setup (fetch + worktree(s)) +
+      # the config.timeout inner deploy + cleanup; the inner
+      # cmd's own cap is config.timeout (600).
+      timeout: 900
+      env:
+        BUPHA_TOKEN: "${secret.BUPHA_TOKEN}"
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        # Shas are hex — refuse anything else before it can
+        # steer the worktree path (rm -rf below).
+        case "$SHA" in ''|*[!0-9a-fA-F]*) echo "bad sha '$SHA'"; exit 1 ;; esac
+        REPO='sepia'
+        # `~` doesn't expand inside "$VAR/…" — expand a
+        # leading tilde via sed (`${}`-free so the campaign
+        # template doesn't eat the bash expansion).
+        expand_tilde() { printf '%s' "$1" | sed "s|^~|$HOME|"; }
+        ROOT=$(expand_tilde '${config.lasius_root}')
+        BASE=$(expand_tilde '${config.worktree_base}')
+        RUN="$BASE/docs-sepia-$SHA"
+        WT="$RUN"
+        mkdir -p "$BASE"
+        # Clone-if-missing — `lasius add` is a no-op when the
+        # clone exists (resolves via gh repo list; needs
+        # GH_TOKEN, injected above).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" vcs fetch "$REPO" --json >/dev/null
+        # Stale worktree from a superseded/killed run.
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$WT" --json >/dev/null 2>&1 || true
+        [ ! -e "$WT" ] || rm -rf "$WT"
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$WT" --rev "$SHA" --json >/dev/null
+        cleanup() {
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$WT" --json >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+        (
+          cd "$WT"
+          ${config.cmd}
+        )
       emit:
-        "0": "docs.9aia-sepia.done"
-        default: "docs.9aia-sepia.failed"
+        "0": "docs.9aia-sepia.done.${event.match.2}"
+        default: "docs.9aia-sepia.failed.${event.match.2}"
+
   - id: docs.9aia-sepia.pending
-    driver: github-status
+    driver: shell
     on: [push.9aia/sepia.refs/heads/docs.**.*]
     max_fires: unlimited
     emits: [docs.9aia-sepia.status-posted]
     params:
-      repo: "9aia/sepia"
-      sha: "${event.match.2}"
-      state: pending
-      context: "${config.context}"
-      token_env: "${config.token_env}"
+      timeout: 120
+      env:
+        # gh api inside `lasius forge` reads GH_TOKEN.
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        REPO='sepia'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        # The status post resolves owner/repo from the clone's
+        # remote — ensure the lasius clone exists first (the deploy
+        # node does the same; `lasius add` is a no-op when present).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state pending \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-sepia.status-posted"
+
   - id: docs.9aia-sepia.status
-    driver: github-status
-    on: [docs.9aia-sepia.done, docs.9aia-sepia.failed, docs.9aia-sepia.failed.*]
+    driver: shell
+    on: [docs.9aia-sepia.done.*, docs.9aia-sepia.failed.*]
     max_fires: unlimited
     emits: [docs.9aia-sepia.status-posted]
     params:
-      repo: "9aia/sepia"
-      sha: "${event.payload.sha:-${event.match.1}}"
-      context: "${config.context}"
-      token_env: "${config.token_env}"
-      description: "${event.type}"
+      timeout: 120
+      env:
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.1}'
+        case '${event.type}' in
+          *.done.*) STATE=success ;;
+          *) STATE=failure ;;
+        esac
+        REPO='sepia'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state "$STATE" \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-sepia.status-posted"
 
   - id: docs.9aia-peregrin
-    driver: git
+    driver: shell
     on: [push.9aia/peregrin.refs/heads/docs.**.*]
     max_fires: unlimited
-    emits: [docs.9aia-peregrin.done, docs.9aia-peregrin.failed]
+    emits: [docs.9aia-peregrin.done.*, docs.9aia-peregrin.failed.*]
     params:
-      url: "${event.match.1}"
-      sha: "${event.match.2}"
-      base: "${config.worktree_base}"
-      token_env: "${config.token_env}"
-      inner:
-        driver: shell
-        params:
-          cmd: "${config.cmd}"
-          timeout: "${config.timeout:-600}"
+      # Node cap covers lasius setup (fetch + worktree(s)) +
+      # the config.timeout inner deploy + cleanup; the inner
+      # cmd's own cap is config.timeout (600).
+      timeout: 900
+      env:
+        BUPHA_TOKEN: "${secret.BUPHA_TOKEN}"
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        # Shas are hex — refuse anything else before it can
+        # steer the worktree path (rm -rf below).
+        case "$SHA" in ''|*[!0-9a-fA-F]*) echo "bad sha '$SHA'"; exit 1 ;; esac
+        REPO='peregrin'
+        # `~` doesn't expand inside "$VAR/…" — expand a
+        # leading tilde via sed (`${}`-free so the campaign
+        # template doesn't eat the bash expansion).
+        expand_tilde() { printf '%s' "$1" | sed "s|^~|$HOME|"; }
+        ROOT=$(expand_tilde '${config.lasius_root}')
+        BASE=$(expand_tilde '${config.worktree_base}')
+        RUN="$BASE/docs-peregrin-$SHA"
+        WT="$RUN"
+        mkdir -p "$BASE"
+        # Clone-if-missing — `lasius add` is a no-op when the
+        # clone exists (resolves via gh repo list; needs
+        # GH_TOKEN, injected above).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" vcs fetch "$REPO" --json >/dev/null
+        # Stale worktree from a superseded/killed run.
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$WT" --json >/dev/null 2>&1 || true
+        [ ! -e "$WT" ] || rm -rf "$WT"
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$WT" --rev "$SHA" --json >/dev/null
+        cleanup() {
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$WT" --json >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+        (
+          cd "$WT"
+          ${config.cmd}
+        )
       emit:
-        "0": "docs.9aia-peregrin.done"
-        default: "docs.9aia-peregrin.failed"
+        "0": "docs.9aia-peregrin.done.${event.match.2}"
+        default: "docs.9aia-peregrin.failed.${event.match.2}"
+
   - id: docs.9aia-peregrin.pending
-    driver: github-status
+    driver: shell
     on: [push.9aia/peregrin.refs/heads/docs.**.*]
     max_fires: unlimited
     emits: [docs.9aia-peregrin.status-posted]
     params:
-      repo: "9aia/peregrin"
-      sha: "${event.match.2}"
-      state: pending
-      context: "${config.context}"
-      token_env: "${config.token_env}"
+      timeout: 120
+      env:
+        # gh api inside `lasius forge` reads GH_TOKEN.
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        REPO='peregrin'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        # The status post resolves owner/repo from the clone's
+        # remote — ensure the lasius clone exists first (the deploy
+        # node does the same; `lasius add` is a no-op when present).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state pending \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-peregrin.status-posted"
+
   - id: docs.9aia-peregrin.status
-    driver: github-status
-    on: [docs.9aia-peregrin.done, docs.9aia-peregrin.failed, docs.9aia-peregrin.failed.*]
+    driver: shell
+    on: [docs.9aia-peregrin.done.*, docs.9aia-peregrin.failed.*]
     max_fires: unlimited
     emits: [docs.9aia-peregrin.status-posted]
     params:
-      repo: "9aia/peregrin"
-      sha: "${event.payload.sha:-${event.match.1}}"
-      context: "${config.context}"
-      token_env: "${config.token_env}"
-      description: "${event.type}"
+      timeout: 120
+      env:
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.1}'
+        case '${event.type}' in
+          *.done.*) STATE=success ;;
+          *) STATE=failure ;;
+        esac
+        REPO='peregrin'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state "$STATE" \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-peregrin.status-posted"
 
   - id: docs.9aia-lasius
-    driver: git
+    driver: shell
     on: [push.9aia/lasius.refs/heads/docs.**.*]
     max_fires: unlimited
-    emits: [docs.9aia-lasius.done, docs.9aia-lasius.failed]
+    emits: [docs.9aia-lasius.done.*, docs.9aia-lasius.failed.*]
     params:
-      url: "${event.match.1}"
-      sha: "${event.match.2}"
-      base: "${config.worktree_base}"
-      token_env: "${config.token_env}"
-      inner:
-        driver: shell
-        params:
-          cmd: "${config.cmd}"
-          timeout: "${config.timeout:-600}"
+      # Node cap covers lasius setup (fetch + worktree(s)) +
+      # the config.timeout inner deploy + cleanup; the inner
+      # cmd's own cap is config.timeout (600).
+      timeout: 900
+      env:
+        BUPHA_TOKEN: "${secret.BUPHA_TOKEN}"
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        # Shas are hex — refuse anything else before it can
+        # steer the worktree path (rm -rf below).
+        case "$SHA" in ''|*[!0-9a-fA-F]*) echo "bad sha '$SHA'"; exit 1 ;; esac
+        REPO='lasius'
+        # `~` doesn't expand inside "$VAR/…" — expand a
+        # leading tilde via sed (`${}`-free so the campaign
+        # template doesn't eat the bash expansion).
+        expand_tilde() { printf '%s' "$1" | sed "s|^~|$HOME|"; }
+        ROOT=$(expand_tilde '${config.lasius_root}')
+        BASE=$(expand_tilde '${config.worktree_base}')
+        RUN="$BASE/docs-lasius-$SHA"
+        WT="$RUN"
+        mkdir -p "$BASE"
+        # Clone-if-missing — `lasius add` is a no-op when the
+        # clone exists (resolves via gh repo list; needs
+        # GH_TOKEN, injected above).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" vcs fetch "$REPO" --json >/dev/null
+        # Stale worktree from a superseded/killed run.
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$WT" --json >/dev/null 2>&1 || true
+        [ ! -e "$WT" ] || rm -rf "$WT"
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$WT" --rev "$SHA" --json >/dev/null
+        cleanup() {
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$WT" --json >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+        (
+          cd "$WT"
+          ${config.cmd}
+        )
       emit:
-        "0": "docs.9aia-lasius.done"
-        default: "docs.9aia-lasius.failed"
+        "0": "docs.9aia-lasius.done.${event.match.2}"
+        default: "docs.9aia-lasius.failed.${event.match.2}"
+
   - id: docs.9aia-lasius.pending
-    driver: github-status
+    driver: shell
     on: [push.9aia/lasius.refs/heads/docs.**.*]
     max_fires: unlimited
     emits: [docs.9aia-lasius.status-posted]
     params:
-      repo: "9aia/lasius"
-      sha: "${event.match.2}"
-      state: pending
-      context: "${config.context}"
-      token_env: "${config.token_env}"
+      timeout: 120
+      env:
+        # gh api inside `lasius forge` reads GH_TOKEN.
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        REPO='lasius'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        # The status post resolves owner/repo from the clone's
+        # remote — ensure the lasius clone exists first (the deploy
+        # node does the same; `lasius add` is a no-op when present).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state pending \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-lasius.status-posted"
+
   - id: docs.9aia-lasius.status
-    driver: github-status
-    on: [docs.9aia-lasius.done, docs.9aia-lasius.failed, docs.9aia-lasius.failed.*]
+    driver: shell
+    on: [docs.9aia-lasius.done.*, docs.9aia-lasius.failed.*]
     max_fires: unlimited
     emits: [docs.9aia-lasius.status-posted]
     params:
-      repo: "9aia/lasius"
-      sha: "${event.payload.sha:-${event.match.1}}"
-      context: "${config.context}"
-      token_env: "${config.token_env}"
-      description: "${event.type}"
+      timeout: 120
+      env:
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.1}'
+        case '${event.type}' in
+          *.done.*) STATE=success ;;
+          *) STATE=failure ;;
+        esac
+        REPO='lasius'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state "$STATE" \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-lasius.status-posted"
 
-
+  # 9aia/myco — gen-dependent: D6 dual checkout, docs-branch
+  # worktree at <run>/docs + main_ref worktree at <run>.
   - id: docs.9aia-myco
-    driver: git
+    driver: shell
     on: [push.9aia/myco.refs/heads/docs.**.*]
     max_fires: unlimited
-    emits: [docs.9aia-myco.done, docs.9aia-myco.failed]
+    emits: [docs.9aia-myco.done.*, docs.9aia-myco.failed.*]
     params:
-      url: "${event.match.1}"
-      sha: "${event.match.2}"
-      base: "${config.worktree_base}"
-      token_env: "${config.token_env}"
-      # Dual checkout (D6): docs worktree at <run>/docs, main_ref worktree
-      # at <run> — docs:deploy's gen steps `cd ..` into the main checkout
-      # for cargo. Inner cwd stays the docs worktree.
-      dest: "docs-myco-${event.match.2}/docs"
-      extra_worktrees:
-        - ref: "${config.main_ref}"
-      inner:
-        driver: shell
-        params:
-          cmd: "${config.cmd}"
-          timeout: "${config.timeout:-600}"
+      # Node cap covers lasius setup (fetch + worktree(s)) +
+      # the config.timeout inner deploy + cleanup; the inner
+      # cmd's own cap is config.timeout (600).
+      timeout: 900
+      env:
+        BUPHA_TOKEN: "${secret.BUPHA_TOKEN}"
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        # Shas are hex — refuse anything else before it can
+        # steer the worktree path (rm -rf below).
+        case "$SHA" in ''|*[!0-9a-fA-F]*) echo "bad sha '$SHA'"; exit 1 ;; esac
+        REPO='myco'
+        # `~` doesn't expand inside "$VAR/…" — expand a
+        # leading tilde via sed (`${}`-free so the campaign
+        # template doesn't eat the bash expansion).
+        expand_tilde() { printf '%s' "$1" | sed "s|^~|$HOME|"; }
+        ROOT=$(expand_tilde '${config.lasius_root}')
+        BASE=$(expand_tilde '${config.worktree_base}')
+        RUN="$BASE/docs-myco-$SHA"
+        DOCS="$RUN/docs"
+        mkdir -p "$BASE"
+        # Clone-if-missing — `lasius add` is a no-op when the
+        # clone exists (resolves via gh repo list; needs
+        # GH_TOKEN, injected above).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" vcs fetch "$REPO" --json >/dev/null
+        # Stale checkouts from a superseded/killed run —
+        # remove registered worktrees first, then plain-dir
+        # leftovers. Primary (docs/) before the container
+        # run root, same order the git driver tore down.
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$DOCS" --json >/dev/null 2>&1 || true
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$RUN" --json >/dev/null 2>&1 || true
+        [ ! -e "$DOCS" ] || rm -rf "$DOCS"
+        [ ! -e "$RUN" ] || rm -rf "$RUN"
+        # D6 dual checkout: the run root holds the
+        # main_ref worktree FIRST (container before the
+        # nested docs/ checkout — git refuses the reverse).
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$RUN" --rev "${config.main_ref}" --json >/dev/null
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$DOCS" --rev "$SHA" --json >/dev/null
+        cleanup() {
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$DOCS" --json >/dev/null 2>&1 || true
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$RUN" --json >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+        (
+          cd "$DOCS"
+          ${config.cmd}
+        )
       emit:
-        "0": "docs.9aia-myco.done"
-        default: "docs.9aia-myco.failed"
+        "0": "docs.9aia-myco.done.${event.match.2}"
+        default: "docs.9aia-myco.failed.${event.match.2}"
+
   - id: docs.9aia-myco.pending
-    driver: github-status
+    driver: shell
     on: [push.9aia/myco.refs/heads/docs.**.*]
     max_fires: unlimited
     emits: [docs.9aia-myco.status-posted]
     params:
-      repo: "9aia/myco"
-      sha: "${event.match.2}"
-      state: pending
-      context: "${config.context}"
-      token_env: "${config.token_env}"
+      timeout: 120
+      env:
+        # gh api inside `lasius forge` reads GH_TOKEN.
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        REPO='myco'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        # The status post resolves owner/repo from the clone's
+        # remote — ensure the lasius clone exists first (the deploy
+        # node does the same; `lasius add` is a no-op when present).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state pending \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-myco.status-posted"
+
   - id: docs.9aia-myco.status
-    driver: github-status
-    on: [docs.9aia-myco.done, docs.9aia-myco.failed, docs.9aia-myco.failed.*]
+    driver: shell
+    on: [docs.9aia-myco.done.*, docs.9aia-myco.failed.*]
     max_fires: unlimited
     emits: [docs.9aia-myco.status-posted]
     params:
-      repo: "9aia/myco"
-      sha: "${event.payload.sha:-${event.match.1}}"
-      context: "${config.context}"
-      token_env: "${config.token_env}"
-      description: "${event.type}"
+      timeout: 120
+      env:
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.1}'
+        case '${event.type}' in
+          *.done.*) STATE=success ;;
+          *) STATE=failure ;;
+        esac
+        REPO='myco'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state "$STATE" \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-myco.status-posted"
 
+  # 9aia/tamias — gen-dependent: D6 dual checkout, docs-branch
+  # worktree at <run>/docs + main_ref worktree at <run>.
   - id: docs.9aia-tamias
-    driver: git
+    driver: shell
     on: [push.9aia/tamias.refs/heads/docs.**.*]
     max_fires: unlimited
-    emits: [docs.9aia-tamias.done, docs.9aia-tamias.failed]
+    emits: [docs.9aia-tamias.done.*, docs.9aia-tamias.failed.*]
     params:
-      url: "${event.match.1}"
-      sha: "${event.match.2}"
-      base: "${config.worktree_base}"
-      token_env: "${config.token_env}"
-      # Dual checkout (D6): docs worktree at <run>/docs, main_ref worktree
-      # at <run> — docs:deploy's gen steps `cd ..` into the main checkout
-      # for cargo. Inner cwd stays the docs worktree.
-      dest: "docs-tamias-${event.match.2}/docs"
-      extra_worktrees:
-        - ref: "${config.main_ref}"
-      inner:
-        driver: shell
-        params:
-          cmd: "${config.cmd}"
-          timeout: "${config.timeout:-600}"
+      # Node cap covers lasius setup (fetch + worktree(s)) +
+      # the config.timeout inner deploy + cleanup; the inner
+      # cmd's own cap is config.timeout (600).
+      timeout: 900
+      env:
+        BUPHA_TOKEN: "${secret.BUPHA_TOKEN}"
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        # Shas are hex — refuse anything else before it can
+        # steer the worktree path (rm -rf below).
+        case "$SHA" in ''|*[!0-9a-fA-F]*) echo "bad sha '$SHA'"; exit 1 ;; esac
+        REPO='tamias'
+        # `~` doesn't expand inside "$VAR/…" — expand a
+        # leading tilde via sed (`${}`-free so the campaign
+        # template doesn't eat the bash expansion).
+        expand_tilde() { printf '%s' "$1" | sed "s|^~|$HOME|"; }
+        ROOT=$(expand_tilde '${config.lasius_root}')
+        BASE=$(expand_tilde '${config.worktree_base}')
+        RUN="$BASE/docs-tamias-$SHA"
+        DOCS="$RUN/docs"
+        mkdir -p "$BASE"
+        # Clone-if-missing — `lasius add` is a no-op when the
+        # clone exists (resolves via gh repo list; needs
+        # GH_TOKEN, injected above).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" vcs fetch "$REPO" --json >/dev/null
+        # Stale checkouts from a superseded/killed run —
+        # remove registered worktrees first, then plain-dir
+        # leftovers. Primary (docs/) before the container
+        # run root, same order the git driver tore down.
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$DOCS" --json >/dev/null 2>&1 || true
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$RUN" --json >/dev/null 2>&1 || true
+        [ ! -e "$DOCS" ] || rm -rf "$DOCS"
+        [ ! -e "$RUN" ] || rm -rf "$RUN"
+        # D6 dual checkout: the run root holds the
+        # main_ref worktree FIRST (container before the
+        # nested docs/ checkout — git refuses the reverse).
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$RUN" --rev "${config.main_ref}" --json >/dev/null
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$DOCS" --rev "$SHA" --json >/dev/null
+        cleanup() {
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$DOCS" --json >/dev/null 2>&1 || true
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$RUN" --json >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+        (
+          cd "$DOCS"
+          ${config.cmd}
+        )
       emit:
-        "0": "docs.9aia-tamias.done"
-        default: "docs.9aia-tamias.failed"
+        "0": "docs.9aia-tamias.done.${event.match.2}"
+        default: "docs.9aia-tamias.failed.${event.match.2}"
+
   - id: docs.9aia-tamias.pending
-    driver: github-status
+    driver: shell
     on: [push.9aia/tamias.refs/heads/docs.**.*]
     max_fires: unlimited
     emits: [docs.9aia-tamias.status-posted]
     params:
-      repo: "9aia/tamias"
-      sha: "${event.match.2}"
-      state: pending
-      context: "${config.context}"
-      token_env: "${config.token_env}"
+      timeout: 120
+      env:
+        # gh api inside `lasius forge` reads GH_TOKEN.
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        REPO='tamias'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        # The status post resolves owner/repo from the clone's
+        # remote — ensure the lasius clone exists first (the deploy
+        # node does the same; `lasius add` is a no-op when present).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state pending \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-tamias.status-posted"
+
   - id: docs.9aia-tamias.status
-    driver: github-status
-    on: [docs.9aia-tamias.done, docs.9aia-tamias.failed, docs.9aia-tamias.failed.*]
+    driver: shell
+    on: [docs.9aia-tamias.done.*, docs.9aia-tamias.failed.*]
     max_fires: unlimited
     emits: [docs.9aia-tamias.status-posted]
     params:
-      repo: "9aia/tamias"
-      sha: "${event.payload.sha:-${event.match.1}}"
-      context: "${config.context}"
-      token_env: "${config.token_env}"
-      description: "${event.type}"
+      timeout: 120
+      env:
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.1}'
+        case '${event.type}' in
+          *.done.*) STATE=success ;;
+          *) STATE=failure ;;
+        esac
+        REPO='tamias'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state "$STATE" \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-tamias.status-posted"
 
+  # 9aia/cuora — gen-dependent: D6 dual checkout, docs-branch
+  # worktree at <run>/docs + main_ref worktree at <run>.
   - id: docs.9aia-cuora
-    driver: git
+    driver: shell
     on: [push.9aia/cuora.refs/heads/docs.**.*]
     max_fires: unlimited
-    emits: [docs.9aia-cuora.done, docs.9aia-cuora.failed]
+    emits: [docs.9aia-cuora.done.*, docs.9aia-cuora.failed.*]
     params:
-      url: "${event.match.1}"
-      sha: "${event.match.2}"
-      base: "${config.worktree_base}"
-      token_env: "${config.token_env}"
-      # Dual checkout (D6): docs worktree at <run>/docs, main_ref worktree
-      # at <run> — docs:deploy's gen steps `cd ..` into the main checkout
-      # for cargo. Inner cwd stays the docs worktree.
-      dest: "docs-cuora-${event.match.2}/docs"
-      extra_worktrees:
-        - ref: "${config.main_ref}"
-      inner:
-        driver: shell
-        params:
-          cmd: "${config.cmd}"
-          timeout: "${config.timeout:-600}"
+      # Node cap covers lasius setup (fetch + worktree(s)) +
+      # the config.timeout inner deploy + cleanup; the inner
+      # cmd's own cap is config.timeout (600).
+      timeout: 900
+      env:
+        BUPHA_TOKEN: "${secret.BUPHA_TOKEN}"
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        # Shas are hex — refuse anything else before it can
+        # steer the worktree path (rm -rf below).
+        case "$SHA" in ''|*[!0-9a-fA-F]*) echo "bad sha '$SHA'"; exit 1 ;; esac
+        REPO='cuora'
+        # `~` doesn't expand inside "$VAR/…" — expand a
+        # leading tilde via sed (`${}`-free so the campaign
+        # template doesn't eat the bash expansion).
+        expand_tilde() { printf '%s' "$1" | sed "s|^~|$HOME|"; }
+        ROOT=$(expand_tilde '${config.lasius_root}')
+        BASE=$(expand_tilde '${config.worktree_base}')
+        RUN="$BASE/docs-cuora-$SHA"
+        DOCS="$RUN/docs"
+        mkdir -p "$BASE"
+        # Clone-if-missing — `lasius add` is a no-op when the
+        # clone exists (resolves via gh repo list; needs
+        # GH_TOKEN, injected above).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" vcs fetch "$REPO" --json >/dev/null
+        # Stale checkouts from a superseded/killed run —
+        # remove registered worktrees first, then plain-dir
+        # leftovers. Primary (docs/) before the container
+        # run root, same order the git driver tore down.
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$DOCS" --json >/dev/null 2>&1 || true
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$RUN" --json >/dev/null 2>&1 || true
+        [ ! -e "$DOCS" ] || rm -rf "$DOCS"
+        [ ! -e "$RUN" ] || rm -rf "$RUN"
+        # D6 dual checkout: the run root holds the
+        # main_ref worktree FIRST (container before the
+        # nested docs/ checkout — git refuses the reverse).
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$RUN" --rev "${config.main_ref}" --json >/dev/null
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$DOCS" --rev "$SHA" --json >/dev/null
+        cleanup() {
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$DOCS" --json >/dev/null 2>&1 || true
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$RUN" --json >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+        (
+          cd "$DOCS"
+          ${config.cmd}
+        )
       emit:
-        "0": "docs.9aia-cuora.done"
-        default: "docs.9aia-cuora.failed"
+        "0": "docs.9aia-cuora.done.${event.match.2}"
+        default: "docs.9aia-cuora.failed.${event.match.2}"
+
   - id: docs.9aia-cuora.pending
-    driver: github-status
+    driver: shell
     on: [push.9aia/cuora.refs/heads/docs.**.*]
     max_fires: unlimited
     emits: [docs.9aia-cuora.status-posted]
     params:
-      repo: "9aia/cuora"
-      sha: "${event.match.2}"
-      state: pending
-      context: "${config.context}"
-      token_env: "${config.token_env}"
+      timeout: 120
+      env:
+        # gh api inside `lasius forge` reads GH_TOKEN.
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        REPO='cuora'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        # The status post resolves owner/repo from the clone's
+        # remote — ensure the lasius clone exists first (the deploy
+        # node does the same; `lasius add` is a no-op when present).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state pending \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-cuora.status-posted"
+
   - id: docs.9aia-cuora.status
-    driver: github-status
-    on: [docs.9aia-cuora.done, docs.9aia-cuora.failed, docs.9aia-cuora.failed.*]
+    driver: shell
+    on: [docs.9aia-cuora.done.*, docs.9aia-cuora.failed.*]
     max_fires: unlimited
     emits: [docs.9aia-cuora.status-posted]
     params:
-      repo: "9aia/cuora"
-      sha: "${event.payload.sha:-${event.match.1}}"
-      context: "${config.context}"
-      token_env: "${config.token_env}"
-      description: "${event.type}"
+      timeout: 120
+      env:
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.1}'
+        case '${event.type}' in
+          *.done.*) STATE=success ;;
+          *) STATE=failure ;;
+        esac
+        REPO='cuora'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state "$STATE" \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-cuora.status-posted"
 
+  # 9aia/pavo — gen-dependent: D6 dual checkout, docs-branch
+  # worktree at <run>/docs + main_ref worktree at <run>.
   - id: docs.9aia-pavo
-    driver: git
+    driver: shell
     on: [push.9aia/pavo.refs/heads/docs.**.*]
     max_fires: unlimited
-    emits: [docs.9aia-pavo.done, docs.9aia-pavo.failed]
+    emits: [docs.9aia-pavo.done.*, docs.9aia-pavo.failed.*]
     params:
-      url: "${event.match.1}"
-      sha: "${event.match.2}"
-      base: "${config.worktree_base}"
-      token_env: "${config.token_env}"
-      # Dual checkout (D6): docs worktree at <run>/docs, main_ref worktree
-      # at <run> — docs:deploy's gen steps `cd ..` into the main checkout
-      # for cargo. Inner cwd stays the docs worktree.
-      dest: "docs-pavo-${event.match.2}/docs"
-      extra_worktrees:
-        - ref: "${config.main_ref}"
-      inner:
-        driver: shell
-        params:
-          cmd: "${config.cmd}"
-          timeout: "${config.timeout:-600}"
+      # Node cap covers lasius setup (fetch + worktree(s)) +
+      # the config.timeout inner deploy + cleanup; the inner
+      # cmd's own cap is config.timeout (600).
+      timeout: 900
+      env:
+        BUPHA_TOKEN: "${secret.BUPHA_TOKEN}"
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        # Shas are hex — refuse anything else before it can
+        # steer the worktree path (rm -rf below).
+        case "$SHA" in ''|*[!0-9a-fA-F]*) echo "bad sha '$SHA'"; exit 1 ;; esac
+        REPO='pavo'
+        # `~` doesn't expand inside "$VAR/…" — expand a
+        # leading tilde via sed (`${}`-free so the campaign
+        # template doesn't eat the bash expansion).
+        expand_tilde() { printf '%s' "$1" | sed "s|^~|$HOME|"; }
+        ROOT=$(expand_tilde '${config.lasius_root}')
+        BASE=$(expand_tilde '${config.worktree_base}')
+        RUN="$BASE/docs-pavo-$SHA"
+        DOCS="$RUN/docs"
+        mkdir -p "$BASE"
+        # Clone-if-missing — `lasius add` is a no-op when the
+        # clone exists (resolves via gh repo list; needs
+        # GH_TOKEN, injected above).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" vcs fetch "$REPO" --json >/dev/null
+        # Stale checkouts from a superseded/killed run —
+        # remove registered worktrees first, then plain-dir
+        # leftovers. Primary (docs/) before the container
+        # run root, same order the git driver tore down.
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$DOCS" --json >/dev/null 2>&1 || true
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$RUN" --json >/dev/null 2>&1 || true
+        [ ! -e "$DOCS" ] || rm -rf "$DOCS"
+        [ ! -e "$RUN" ] || rm -rf "$RUN"
+        # D6 dual checkout: the run root holds the
+        # main_ref worktree FIRST (container before the
+        # nested docs/ checkout — git refuses the reverse).
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$RUN" --rev "${config.main_ref}" --json >/dev/null
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$DOCS" --rev "$SHA" --json >/dev/null
+        cleanup() {
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$DOCS" --json >/dev/null 2>&1 || true
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$RUN" --json >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+        (
+          cd "$DOCS"
+          ${config.cmd}
+        )
       emit:
-        "0": "docs.9aia-pavo.done"
-        default: "docs.9aia-pavo.failed"
+        "0": "docs.9aia-pavo.done.${event.match.2}"
+        default: "docs.9aia-pavo.failed.${event.match.2}"
+
   - id: docs.9aia-pavo.pending
-    driver: github-status
+    driver: shell
     on: [push.9aia/pavo.refs/heads/docs.**.*]
     max_fires: unlimited
     emits: [docs.9aia-pavo.status-posted]
     params:
-      repo: "9aia/pavo"
-      sha: "${event.match.2}"
-      state: pending
-      context: "${config.context}"
-      token_env: "${config.token_env}"
+      timeout: 120
+      env:
+        # gh api inside `lasius forge` reads GH_TOKEN.
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        REPO='pavo'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        # The status post resolves owner/repo from the clone's
+        # remote — ensure the lasius clone exists first (the deploy
+        # node does the same; `lasius add` is a no-op when present).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state pending \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-pavo.status-posted"
+
   - id: docs.9aia-pavo.status
-    driver: github-status
-    on: [docs.9aia-pavo.done, docs.9aia-pavo.failed, docs.9aia-pavo.failed.*]
+    driver: shell
+    on: [docs.9aia-pavo.done.*, docs.9aia-pavo.failed.*]
     max_fires: unlimited
     emits: [docs.9aia-pavo.status-posted]
     params:
-      repo: "9aia/pavo"
-      sha: "${event.payload.sha:-${event.match.1}}"
-      context: "${config.context}"
-      token_env: "${config.token_env}"
-      description: "${event.type}"
+      timeout: 120
+      env:
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.1}'
+        case '${event.type}' in
+          *.done.*) STATE=success ;;
+          *) STATE=failure ;;
+        esac
+        REPO='pavo'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state "$STATE" \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-pavo.status-posted"
 
+  # 9aia/hypha — gen-dependent: D6 dual checkout, docs-branch
+  # worktree at <run>/docs + main_ref worktree at <run>.
   - id: docs.9aia-hypha
-    driver: git
+    driver: shell
     on: [push.9aia/hypha.refs/heads/docs.**.*]
     max_fires: unlimited
-    emits: [docs.9aia-hypha.done, docs.9aia-hypha.failed]
+    emits: [docs.9aia-hypha.done.*, docs.9aia-hypha.failed.*]
     params:
-      url: "${event.match.1}"
-      sha: "${event.match.2}"
-      base: "${config.worktree_base}"
-      token_env: "${config.token_env}"
-      # Dual checkout (D6): docs worktree at <run>/docs, main_ref worktree
-      # at <run> — docs:deploy's gen steps `cd ..` into the main checkout
-      # for cargo. Inner cwd stays the docs worktree.
-      dest: "docs-hypha-${event.match.2}/docs"
-      extra_worktrees:
-        - ref: "${config.main_ref}"
-      inner:
-        driver: shell
-        params:
-          cmd: "${config.cmd}"
-          timeout: "${config.timeout:-600}"
+      # Node cap covers lasius setup (fetch + worktree(s)) +
+      # the config.timeout inner deploy + cleanup; the inner
+      # cmd's own cap is config.timeout (600).
+      timeout: 900
+      env:
+        BUPHA_TOKEN: "${secret.BUPHA_TOKEN}"
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        # Shas are hex — refuse anything else before it can
+        # steer the worktree path (rm -rf below).
+        case "$SHA" in ''|*[!0-9a-fA-F]*) echo "bad sha '$SHA'"; exit 1 ;; esac
+        REPO='hypha'
+        # `~` doesn't expand inside "$VAR/…" — expand a
+        # leading tilde via sed (`${}`-free so the campaign
+        # template doesn't eat the bash expansion).
+        expand_tilde() { printf '%s' "$1" | sed "s|^~|$HOME|"; }
+        ROOT=$(expand_tilde '${config.lasius_root}')
+        BASE=$(expand_tilde '${config.worktree_base}')
+        RUN="$BASE/docs-hypha-$SHA"
+        DOCS="$RUN/docs"
+        mkdir -p "$BASE"
+        # Clone-if-missing — `lasius add` is a no-op when the
+        # clone exists (resolves via gh repo list; needs
+        # GH_TOKEN, injected above).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" vcs fetch "$REPO" --json >/dev/null
+        # Stale checkouts from a superseded/killed run —
+        # remove registered worktrees first, then plain-dir
+        # leftovers. Primary (docs/) before the container
+        # run root, same order the git driver tore down.
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$DOCS" --json >/dev/null 2>&1 || true
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$RUN" --json >/dev/null 2>&1 || true
+        [ ! -e "$DOCS" ] || rm -rf "$DOCS"
+        [ ! -e "$RUN" ] || rm -rf "$RUN"
+        # D6 dual checkout: the run root holds the
+        # main_ref worktree FIRST (container before the
+        # nested docs/ checkout — git refuses the reverse).
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$RUN" --rev "${config.main_ref}" --json >/dev/null
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$DOCS" --rev "$SHA" --json >/dev/null
+        cleanup() {
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$DOCS" --json >/dev/null 2>&1 || true
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$RUN" --json >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+        (
+          cd "$DOCS"
+          ${config.cmd}
+        )
       emit:
-        "0": "docs.9aia-hypha.done"
-        default: "docs.9aia-hypha.failed"
+        "0": "docs.9aia-hypha.done.${event.match.2}"
+        default: "docs.9aia-hypha.failed.${event.match.2}"
+
   - id: docs.9aia-hypha.pending
-    driver: github-status
+    driver: shell
     on: [push.9aia/hypha.refs/heads/docs.**.*]
     max_fires: unlimited
     emits: [docs.9aia-hypha.status-posted]
     params:
-      repo: "9aia/hypha"
-      sha: "${event.match.2}"
-      state: pending
-      context: "${config.context}"
-      token_env: "${config.token_env}"
+      timeout: 120
+      env:
+        # gh api inside `lasius forge` reads GH_TOKEN.
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        REPO='hypha'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        # The status post resolves owner/repo from the clone's
+        # remote — ensure the lasius clone exists first (the deploy
+        # node does the same; `lasius add` is a no-op when present).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state pending \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-hypha.status-posted"
+
   - id: docs.9aia-hypha.status
-    driver: github-status
-    on: [docs.9aia-hypha.done, docs.9aia-hypha.failed, docs.9aia-hypha.failed.*]
+    driver: shell
+    on: [docs.9aia-hypha.done.*, docs.9aia-hypha.failed.*]
     max_fires: unlimited
     emits: [docs.9aia-hypha.status-posted]
     params:
-      repo: "9aia/hypha"
-      sha: "${event.payload.sha:-${event.match.1}}"
-      context: "${config.context}"
-      token_env: "${config.token_env}"
-      description: "${event.type}"
+      timeout: 120
+      env:
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.1}'
+        case '${event.type}' in
+          *.done.*) STATE=success ;;
+          *) STATE=failure ;;
+        esac
+        REPO='hypha'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state "$STATE" \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-hypha.status-posted"
 
+  # 9aia/sturn — gen-dependent: D6 dual checkout, docs-branch
+  # worktree at <run>/docs + main_ref worktree at <run>.
   - id: docs.9aia-sturn
-    driver: git
+    driver: shell
     on: [push.9aia/sturn.refs/heads/docs.**.*]
     max_fires: unlimited
-    emits: [docs.9aia-sturn.done, docs.9aia-sturn.failed]
+    emits: [docs.9aia-sturn.done.*, docs.9aia-sturn.failed.*]
     params:
-      url: "${event.match.1}"
-      sha: "${event.match.2}"
-      base: "${config.worktree_base}"
-      token_env: "${config.token_env}"
-      # Dual checkout (D6): docs worktree at <run>/docs, main_ref worktree
-      # at <run> — docs:deploy's gen steps `cd ..` into the main checkout
-      # for cargo. Inner cwd stays the docs worktree.
-      dest: "docs-sturn-${event.match.2}/docs"
-      extra_worktrees:
-        - ref: "${config.main_ref}"
-      inner:
-        driver: shell
-        params:
-          cmd: "${config.cmd}"
-          timeout: "${config.timeout:-600}"
+      # Node cap covers lasius setup (fetch + worktree(s)) +
+      # the config.timeout inner deploy + cleanup; the inner
+      # cmd's own cap is config.timeout (600).
+      timeout: 900
+      env:
+        BUPHA_TOKEN: "${secret.BUPHA_TOKEN}"
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        # Shas are hex — refuse anything else before it can
+        # steer the worktree path (rm -rf below).
+        case "$SHA" in ''|*[!0-9a-fA-F]*) echo "bad sha '$SHA'"; exit 1 ;; esac
+        REPO='sturn'
+        # `~` doesn't expand inside "$VAR/…" — expand a
+        # leading tilde via sed (`${}`-free so the campaign
+        # template doesn't eat the bash expansion).
+        expand_tilde() { printf '%s' "$1" | sed "s|^~|$HOME|"; }
+        ROOT=$(expand_tilde '${config.lasius_root}')
+        BASE=$(expand_tilde '${config.worktree_base}')
+        RUN="$BASE/docs-sturn-$SHA"
+        DOCS="$RUN/docs"
+        mkdir -p "$BASE"
+        # Clone-if-missing — `lasius add` is a no-op when the
+        # clone exists (resolves via gh repo list; needs
+        # GH_TOKEN, injected above).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" vcs fetch "$REPO" --json >/dev/null
+        # Stale checkouts from a superseded/killed run —
+        # remove registered worktrees first, then plain-dir
+        # leftovers. Primary (docs/) before the container
+        # run root, same order the git driver tore down.
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$DOCS" --json >/dev/null 2>&1 || true
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$RUN" --json >/dev/null 2>&1 || true
+        [ ! -e "$DOCS" ] || rm -rf "$DOCS"
+        [ ! -e "$RUN" ] || rm -rf "$RUN"
+        # D6 dual checkout: the run root holds the
+        # main_ref worktree FIRST (container before the
+        # nested docs/ checkout — git refuses the reverse).
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$RUN" --rev "${config.main_ref}" --json >/dev/null
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$DOCS" --rev "$SHA" --json >/dev/null
+        cleanup() {
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$DOCS" --json >/dev/null 2>&1 || true
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$RUN" --json >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+        (
+          cd "$DOCS"
+          ${config.cmd}
+        )
       emit:
-        "0": "docs.9aia-sturn.done"
-        default: "docs.9aia-sturn.failed"
+        "0": "docs.9aia-sturn.done.${event.match.2}"
+        default: "docs.9aia-sturn.failed.${event.match.2}"
+
   - id: docs.9aia-sturn.pending
-    driver: github-status
+    driver: shell
     on: [push.9aia/sturn.refs/heads/docs.**.*]
     max_fires: unlimited
     emits: [docs.9aia-sturn.status-posted]
     params:
-      repo: "9aia/sturn"
-      sha: "${event.match.2}"
-      state: pending
-      context: "${config.context}"
-      token_env: "${config.token_env}"
+      timeout: 120
+      env:
+        # gh api inside `lasius forge` reads GH_TOKEN.
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        REPO='sturn'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        # The status post resolves owner/repo from the clone's
+        # remote — ensure the lasius clone exists first (the deploy
+        # node does the same; `lasius add` is a no-op when present).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state pending \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-sturn.status-posted"
+
   - id: docs.9aia-sturn.status
-    driver: github-status
-    on: [docs.9aia-sturn.done, docs.9aia-sturn.failed, docs.9aia-sturn.failed.*]
+    driver: shell
+    on: [docs.9aia-sturn.done.*, docs.9aia-sturn.failed.*]
     max_fires: unlimited
     emits: [docs.9aia-sturn.status-posted]
     params:
-      repo: "9aia/sturn"
-      sha: "${event.payload.sha:-${event.match.1}}"
-      context: "${config.context}"
-      token_env: "${config.token_env}"
-      description: "${event.type}"
+      timeout: 120
+      env:
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.1}'
+        case '${event.type}' in
+          *.done.*) STATE=success ;;
+          *) STATE=failure ;;
+        esac
+        REPO='sturn'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state "$STATE" \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-sturn.status-posted"
 
+  # 9aia/kuda — gen-dependent: D6 dual checkout, docs-branch
+  # worktree at <run>/docs + main_ref worktree at <run>.
   - id: docs.9aia-kuda
-    driver: git
+    driver: shell
     on: [push.9aia/kuda.refs/heads/docs.**.*]
     max_fires: unlimited
-    emits: [docs.9aia-kuda.done, docs.9aia-kuda.failed]
+    emits: [docs.9aia-kuda.done.*, docs.9aia-kuda.failed.*]
     params:
-      url: "${event.match.1}"
-      sha: "${event.match.2}"
-      base: "${config.worktree_base}"
-      token_env: "${config.token_env}"
-      # Dual checkout (D6): docs worktree at <run>/docs, main_ref worktree
-      # at <run> — docs:deploy's gen steps `cd ..` into the main checkout
-      # for cargo. Inner cwd stays the docs worktree.
-      dest: "docs-kuda-${event.match.2}/docs"
-      extra_worktrees:
-        - ref: "${config.main_ref}"
-      inner:
-        driver: shell
-        params:
-          cmd: "${config.cmd}"
-          timeout: "${config.timeout:-600}"
+      # Node cap covers lasius setup (fetch + worktree(s)) +
+      # the config.timeout inner deploy + cleanup; the inner
+      # cmd's own cap is config.timeout (600).
+      timeout: 900
+      env:
+        BUPHA_TOKEN: "${secret.BUPHA_TOKEN}"
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        # Shas are hex — refuse anything else before it can
+        # steer the worktree path (rm -rf below).
+        case "$SHA" in ''|*[!0-9a-fA-F]*) echo "bad sha '$SHA'"; exit 1 ;; esac
+        REPO='kuda'
+        # `~` doesn't expand inside "$VAR/…" — expand a
+        # leading tilde via sed (`${}`-free so the campaign
+        # template doesn't eat the bash expansion).
+        expand_tilde() { printf '%s' "$1" | sed "s|^~|$HOME|"; }
+        ROOT=$(expand_tilde '${config.lasius_root}')
+        BASE=$(expand_tilde '${config.worktree_base}')
+        RUN="$BASE/docs-kuda-$SHA"
+        DOCS="$RUN/docs"
+        mkdir -p "$BASE"
+        # Clone-if-missing — `lasius add` is a no-op when the
+        # clone exists (resolves via gh repo list; needs
+        # GH_TOKEN, injected above).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" vcs fetch "$REPO" --json >/dev/null
+        # Stale checkouts from a superseded/killed run —
+        # remove registered worktrees first, then plain-dir
+        # leftovers. Primary (docs/) before the container
+        # run root, same order the git driver tore down.
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$DOCS" --json >/dev/null 2>&1 || true
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$RUN" --json >/dev/null 2>&1 || true
+        [ ! -e "$DOCS" ] || rm -rf "$DOCS"
+        [ ! -e "$RUN" ] || rm -rf "$RUN"
+        # D6 dual checkout: the run root holds the
+        # main_ref worktree FIRST (container before the
+        # nested docs/ checkout — git refuses the reverse).
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$RUN" --rev "${config.main_ref}" --json >/dev/null
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$DOCS" --rev "$SHA" --json >/dev/null
+        cleanup() {
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$DOCS" --json >/dev/null 2>&1 || true
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$RUN" --json >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+        (
+          cd "$DOCS"
+          ${config.cmd}
+        )
       emit:
-        "0": "docs.9aia-kuda.done"
-        default: "docs.9aia-kuda.failed"
+        "0": "docs.9aia-kuda.done.${event.match.2}"
+        default: "docs.9aia-kuda.failed.${event.match.2}"
+
   - id: docs.9aia-kuda.pending
-    driver: github-status
+    driver: shell
     on: [push.9aia/kuda.refs/heads/docs.**.*]
     max_fires: unlimited
     emits: [docs.9aia-kuda.status-posted]
     params:
-      repo: "9aia/kuda"
-      sha: "${event.match.2}"
-      state: pending
-      context: "${config.context}"
-      token_env: "${config.token_env}"
+      timeout: 120
+      env:
+        # gh api inside `lasius forge` reads GH_TOKEN.
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        REPO='kuda'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        # The status post resolves owner/repo from the clone's
+        # remote — ensure the lasius clone exists first (the deploy
+        # node does the same; `lasius add` is a no-op when present).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state pending \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-kuda.status-posted"
+
   - id: docs.9aia-kuda.status
-    driver: github-status
-    on: [docs.9aia-kuda.done, docs.9aia-kuda.failed, docs.9aia-kuda.failed.*]
+    driver: shell
+    on: [docs.9aia-kuda.done.*, docs.9aia-kuda.failed.*]
     max_fires: unlimited
     emits: [docs.9aia-kuda.status-posted]
     params:
-      repo: "9aia/kuda"
-      sha: "${event.payload.sha:-${event.match.1}}"
-      context: "${config.context}"
-      token_env: "${config.token_env}"
-      description: "${event.type}"
+      timeout: 120
+      env:
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.1}'
+        case '${event.type}' in
+          *.done.*) STATE=success ;;
+          *) STATE=failure ;;
+        esac
+        REPO='kuda'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state "$STATE" \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-kuda.status-posted"
 
+  # 9aia/mimus — gen-dependent: D6 dual checkout, docs-branch
+  # worktree at <run>/docs + main_ref worktree at <run>.
   - id: docs.9aia-mimus
-    driver: git
+    driver: shell
     on: [push.9aia/mimus.refs/heads/docs.**.*]
     max_fires: unlimited
-    emits: [docs.9aia-mimus.done, docs.9aia-mimus.failed]
+    emits: [docs.9aia-mimus.done.*, docs.9aia-mimus.failed.*]
     params:
-      url: "${event.match.1}"
-      sha: "${event.match.2}"
-      base: "${config.worktree_base}"
-      token_env: "${config.token_env}"
-      # Dual checkout (D6): docs worktree at <run>/docs, main_ref worktree
-      # at <run> — docs:deploy's gen steps `cd ..` into the main checkout
-      # for cargo. Inner cwd stays the docs worktree.
-      dest: "docs-mimus-${event.match.2}/docs"
-      extra_worktrees:
-        - ref: "${config.main_ref}"
-      inner:
-        driver: shell
-        params:
-          cmd: "${config.cmd}"
-          timeout: "${config.timeout:-600}"
+      # Node cap covers lasius setup (fetch + worktree(s)) +
+      # the config.timeout inner deploy + cleanup; the inner
+      # cmd's own cap is config.timeout (600).
+      timeout: 900
+      env:
+        BUPHA_TOKEN: "${secret.BUPHA_TOKEN}"
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        # Shas are hex — refuse anything else before it can
+        # steer the worktree path (rm -rf below).
+        case "$SHA" in ''|*[!0-9a-fA-F]*) echo "bad sha '$SHA'"; exit 1 ;; esac
+        REPO='mimus'
+        # `~` doesn't expand inside "$VAR/…" — expand a
+        # leading tilde via sed (`${}`-free so the campaign
+        # template doesn't eat the bash expansion).
+        expand_tilde() { printf '%s' "$1" | sed "s|^~|$HOME|"; }
+        ROOT=$(expand_tilde '${config.lasius_root}')
+        BASE=$(expand_tilde '${config.worktree_base}')
+        RUN="$BASE/docs-mimus-$SHA"
+        DOCS="$RUN/docs"
+        mkdir -p "$BASE"
+        # Clone-if-missing — `lasius add` is a no-op when the
+        # clone exists (resolves via gh repo list; needs
+        # GH_TOKEN, injected above).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" vcs fetch "$REPO" --json >/dev/null
+        # Stale checkouts from a superseded/killed run —
+        # remove registered worktrees first, then plain-dir
+        # leftovers. Primary (docs/) before the container
+        # run root, same order the git driver tore down.
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$DOCS" --json >/dev/null 2>&1 || true
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$RUN" --json >/dev/null 2>&1 || true
+        [ ! -e "$DOCS" ] || rm -rf "$DOCS"
+        [ ! -e "$RUN" ] || rm -rf "$RUN"
+        # D6 dual checkout: the run root holds the
+        # main_ref worktree FIRST (container before the
+        # nested docs/ checkout — git refuses the reverse).
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$RUN" --rev "${config.main_ref}" --json >/dev/null
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$DOCS" --rev "$SHA" --json >/dev/null
+        cleanup() {
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$DOCS" --json >/dev/null 2>&1 || true
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$RUN" --json >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+        (
+          cd "$DOCS"
+          ${config.cmd}
+        )
       emit:
-        "0": "docs.9aia-mimus.done"
-        default: "docs.9aia-mimus.failed"
+        "0": "docs.9aia-mimus.done.${event.match.2}"
+        default: "docs.9aia-mimus.failed.${event.match.2}"
+
   - id: docs.9aia-mimus.pending
-    driver: github-status
+    driver: shell
     on: [push.9aia/mimus.refs/heads/docs.**.*]
     max_fires: unlimited
     emits: [docs.9aia-mimus.status-posted]
     params:
-      repo: "9aia/mimus"
-      sha: "${event.match.2}"
-      state: pending
-      context: "${config.context}"
-      token_env: "${config.token_env}"
+      timeout: 120
+      env:
+        # gh api inside `lasius forge` reads GH_TOKEN.
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        REPO='mimus'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        # The status post resolves owner/repo from the clone's
+        # remote — ensure the lasius clone exists first (the deploy
+        # node does the same; `lasius add` is a no-op when present).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state pending \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-mimus.status-posted"
+
   - id: docs.9aia-mimus.status
-    driver: github-status
-    on: [docs.9aia-mimus.done, docs.9aia-mimus.failed, docs.9aia-mimus.failed.*]
+    driver: shell
+    on: [docs.9aia-mimus.done.*, docs.9aia-mimus.failed.*]
     max_fires: unlimited
     emits: [docs.9aia-mimus.status-posted]
     params:
-      repo: "9aia/mimus"
-      sha: "${event.payload.sha:-${event.match.1}}"
-      context: "${config.context}"
-      token_env: "${config.token_env}"
-      description: "${event.type}"
+      timeout: 120
+      env:
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.1}'
+        case '${event.type}' in
+          *.done.*) STATE=success ;;
+          *) STATE=failure ;;
+        esac
+        REPO='mimus'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state "$STATE" \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-mimus.status-posted"
 
+  # 9aia/bupha — gen-dependent: D6 dual checkout, docs-branch
+  # worktree at <run>/docs + main_ref worktree at <run>.
   - id: docs.9aia-bupha
-    driver: git
+    driver: shell
     on: [push.9aia/bupha.refs/heads/docs.**.*]
     max_fires: unlimited
-    emits: [docs.9aia-bupha.done, docs.9aia-bupha.failed]
+    emits: [docs.9aia-bupha.done.*, docs.9aia-bupha.failed.*]
     params:
-      url: "${event.match.1}"
-      sha: "${event.match.2}"
-      base: "${config.worktree_base}"
-      token_env: "${config.token_env}"
-      # Dual checkout (D6): docs worktree at <run>/docs, main_ref worktree
-      # at <run> — docs:deploy's gen steps `cd ..` into the main checkout
-      # for cargo. Inner cwd stays the docs worktree.
-      dest: "docs-bupha-${event.match.2}/docs"
-      extra_worktrees:
-        - ref: "${config.main_ref}"
-      inner:
-        driver: shell
-        params:
-          cmd: "${config.cmd}"
-          timeout: "${config.timeout:-600}"
+      # Node cap covers lasius setup (fetch + worktree(s)) +
+      # the config.timeout inner deploy + cleanup; the inner
+      # cmd's own cap is config.timeout (600).
+      timeout: 900
+      env:
+        BUPHA_TOKEN: "${secret.BUPHA_TOKEN}"
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        # Shas are hex — refuse anything else before it can
+        # steer the worktree path (rm -rf below).
+        case "$SHA" in ''|*[!0-9a-fA-F]*) echo "bad sha '$SHA'"; exit 1 ;; esac
+        REPO='bupha'
+        # `~` doesn't expand inside "$VAR/…" — expand a
+        # leading tilde via sed (`${}`-free so the campaign
+        # template doesn't eat the bash expansion).
+        expand_tilde() { printf '%s' "$1" | sed "s|^~|$HOME|"; }
+        ROOT=$(expand_tilde '${config.lasius_root}')
+        BASE=$(expand_tilde '${config.worktree_base}')
+        RUN="$BASE/docs-bupha-$SHA"
+        DOCS="$RUN/docs"
+        mkdir -p "$BASE"
+        # Clone-if-missing — `lasius add` is a no-op when the
+        # clone exists (resolves via gh repo list; needs
+        # GH_TOKEN, injected above).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" vcs fetch "$REPO" --json >/dev/null
+        # Stale checkouts from a superseded/killed run —
+        # remove registered worktrees first, then plain-dir
+        # leftovers. Primary (docs/) before the container
+        # run root, same order the git driver tore down.
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$DOCS" --json >/dev/null 2>&1 || true
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$RUN" --json >/dev/null 2>&1 || true
+        [ ! -e "$DOCS" ] || rm -rf "$DOCS"
+        [ ! -e "$RUN" ] || rm -rf "$RUN"
+        # D6 dual checkout: the run root holds the
+        # main_ref worktree FIRST (container before the
+        # nested docs/ checkout — git refuses the reverse).
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$RUN" --rev "${config.main_ref}" --json >/dev/null
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$DOCS" --rev "$SHA" --json >/dev/null
+        cleanup() {
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$DOCS" --json >/dev/null 2>&1 || true
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$RUN" --json >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+        (
+          cd "$DOCS"
+          ${config.cmd}
+        )
       emit:
-        "0": "docs.9aia-bupha.done"
-        default: "docs.9aia-bupha.failed"
+        "0": "docs.9aia-bupha.done.${event.match.2}"
+        default: "docs.9aia-bupha.failed.${event.match.2}"
+
   - id: docs.9aia-bupha.pending
-    driver: github-status
+    driver: shell
     on: [push.9aia/bupha.refs/heads/docs.**.*]
     max_fires: unlimited
     emits: [docs.9aia-bupha.status-posted]
     params:
-      repo: "9aia/bupha"
-      sha: "${event.match.2}"
-      state: pending
-      context: "${config.context}"
-      token_env: "${config.token_env}"
+      timeout: 120
+      env:
+        # gh api inside `lasius forge` reads GH_TOKEN.
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        REPO='bupha'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        # The status post resolves owner/repo from the clone's
+        # remote — ensure the lasius clone exists first (the deploy
+        # node does the same; `lasius add` is a no-op when present).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state pending \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-bupha.status-posted"
+
   - id: docs.9aia-bupha.status
-    driver: github-status
-    on: [docs.9aia-bupha.done, docs.9aia-bupha.failed, docs.9aia-bupha.failed.*]
+    driver: shell
+    on: [docs.9aia-bupha.done.*, docs.9aia-bupha.failed.*]
     max_fires: unlimited
     emits: [docs.9aia-bupha.status-posted]
     params:
-      repo: "9aia/bupha"
-      sha: "${event.payload.sha:-${event.match.1}}"
-      context: "${config.context}"
-      token_env: "${config.token_env}"
-      description: "${event.type}"
-
-  # 9aia.github.io — the org site lives on `main` (no docs branch), so
-  # this triplet subscribes refs/heads/main; self-contained (site
-  # checkout IS the repo root), no extra_worktrees.
-  - id: docs.9aia-github-io
-    driver: git
-    on: [push.9aia/9aia.github.io.refs/heads/main.**.*]
-    max_fires: unlimited
-    emits: [docs.9aia-github-io.done, docs.9aia-github-io.failed]
-    params:
-      url: "${event.match.1}"
-      sha: "${event.match.2}"
-      base: "${config.worktree_base}"
-      token_env: "${config.token_env}"
-      inner:
-        driver: shell
-        params:
-          cmd: "${config.cmd}"
-          timeout: "${config.timeout:-600}"
+      timeout: 120
+      env:
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.1}'
+        case '${event.type}' in
+          *.done.*) STATE=success ;;
+          *) STATE=failure ;;
+        esac
+        REPO='bupha'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state "$STATE" \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
       emit:
-        "0": "docs.9aia-github-io.done"
-        default: "docs.9aia-github-io.failed"
+        "0": "docs.9aia-bupha.status-posted"
+
+  # 9aia.github.io — the org site lives on `main` (no docs
+  # branch); self-contained, single worktree at the sha.
+  - id: docs.9aia-github-io
+    driver: shell
+    on: [push.9aia/9aia.github.io.refs/heads/main.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-github-io.done.*, docs.9aia-github-io.failed.*]
+    params:
+      # Node cap covers lasius setup (fetch + worktree(s)) +
+      # the config.timeout inner deploy + cleanup; the inner
+      # cmd's own cap is config.timeout (600).
+      timeout: 900
+      env:
+        BUPHA_TOKEN: "${secret.BUPHA_TOKEN}"
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        # Shas are hex — refuse anything else before it can
+        # steer the worktree path (rm -rf below).
+        case "$SHA" in ''|*[!0-9a-fA-F]*) echo "bad sha '$SHA'"; exit 1 ;; esac
+        REPO='9aia.github.io'
+        # `~` doesn't expand inside "$VAR/…" — expand a
+        # leading tilde via sed (`${}`-free so the campaign
+        # template doesn't eat the bash expansion).
+        expand_tilde() { printf '%s' "$1" | sed "s|^~|$HOME|"; }
+        ROOT=$(expand_tilde '${config.lasius_root}')
+        BASE=$(expand_tilde '${config.worktree_base}')
+        RUN="$BASE/docs-9aia.github.io-$SHA"
+        WT="$RUN"
+        mkdir -p "$BASE"
+        # Clone-if-missing — `lasius add` is a no-op when the
+        # clone exists (resolves via gh repo list; needs
+        # GH_TOKEN, injected above).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" vcs fetch "$REPO" --json >/dev/null
+        # Stale worktree from a superseded/killed run.
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$WT" --json >/dev/null 2>&1 || true
+        [ ! -e "$WT" ] || rm -rf "$WT"
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$WT" --rev "$SHA" --json >/dev/null
+        cleanup() {
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$WT" --json >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+        (
+          cd "$WT"
+          ${config.cmd}
+        )
+      emit:
+        "0": "docs.9aia-github-io.done.${event.match.2}"
+        default: "docs.9aia-github-io.failed.${event.match.2}"
+
   - id: docs.9aia-github-io.pending
-    driver: github-status
+    driver: shell
     on: [push.9aia/9aia.github.io.refs/heads/main.**.*]
     max_fires: unlimited
     emits: [docs.9aia-github-io.status-posted]
     params:
-      repo: "9aia/9aia.github.io"
-      sha: "${event.match.2}"
-      state: pending
-      context: "${config.context}"
-      token_env: "${config.token_env}"
+      timeout: 120
+      env:
+        # gh api inside `lasius forge` reads GH_TOKEN.
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        REPO='9aia.github.io'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        # The status post resolves owner/repo from the clone's
+        # remote — ensure the lasius clone exists first (the deploy
+        # node does the same; `lasius add` is a no-op when present).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state pending \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-github-io.status-posted"
+
   - id: docs.9aia-github-io.status
-    driver: github-status
-    on: [docs.9aia-github-io.done, docs.9aia-github-io.failed, docs.9aia-github-io.failed.*]
+    driver: shell
+    on: [docs.9aia-github-io.done.*, docs.9aia-github-io.failed.*]
     max_fires: unlimited
     emits: [docs.9aia-github-io.status-posted]
     params:
-      repo: "9aia/9aia.github.io"
-      sha: "${event.payload.sha:-${event.match.1}}"
-      context: "${config.context}"
-      token_env: "${config.token_env}"
-      description: "${event.type}"
+      timeout: 120
+      env:
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.1}'
+        case '${event.type}' in
+          *.done.*) STATE=success ;;
+          *) STATE=failure ;;
+        esac
+        REPO='9aia.github.io'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state "$STATE" \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-github-io.status-posted"
 
-  # driver-git emits plain `node.failed` for clone/checkout/
-  # materialization failures — not the emit-mapped `<node>.failed`.
-  # Remap any node.failed carrying {node, sha} onto
-  # `<node>.failed.<sha>` so the per-repo verdict sinks see
-  # materialization failures too (the trailing type segment is the
-  # sha; the status nodes' `failed.*` subscription +
-  # `${event.match.1}` sha pick it up).
+  # node.failed events carrying {node, sha} (driver-level failures
+  # that never reached the emit map) are remapped onto
+  # `<node>.failed.<sha>` so the per-repo verdict sinks see them too
+  # (the trailing type segment is the sha; the status nodes' `failed.*`
+  # subscription + `${event.match.1}` sha pick it up). Shell-node
+  # failures carry {stdout,rc,cmd} — no node/sha — and land on
+  # docs.unmapped, same as the old github-status driver's failures.
   - id: docs.failmap
     driver: shell
     on: [node.failed]

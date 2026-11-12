@@ -2,38 +2,42 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://9aia.dev/peregrin/bundles/docs-deploy/params.schema.json",
   "title": "docs-deploy params",
-  "description": "Operator-facing config keys for the docs-deploy bundle — ADR-0081's locked decision: bundle params validate against JSON Schema. token_env/secret_env are secret NAMES, never values.",
+  "description": "Operator-facing config keys for the docs-deploy bundle — ADR-0081's locked decision: bundle params validate against JSON Schema. token_env/secret_env are secret NAMES, never values. All VCS/forge ops go through lasius (`lasius vcs`/`lasius forge`).",
   "type": "object",
   "additionalProperties": false,
   "properties": {
     "worktree_base": {
       "type": "string",
       "default": "~/.local/share/peregrin/worktrees",
-      "description": "driver-git base — worktrees and the clone cache live under it."
+      "description": "Base dir for the deploy worktrees — each run gets <worktree_base>/docs-<repo>-<sha>[ /docs ]."
+    },
+    "lasius_root": {
+      "type": "string",
+      "description": "lasius workspace root (`lasius --root`) — repo args are clone names resolved under <lasius_root>/<repos_dir>/<name>. Ships the org-workspace path (same as pr-heal); review per deployment."
     },
     "token_env": {
       "type": "string",
       "default": "BUPHA_TOKEN",
       "pattern": "^[A-Za-z_][A-Za-z0-9_.-]*$",
-      "description": "NAME of the secret holding the forge token (clone auth + gh-pages push + status posts). Never the value. Must match the $<name> the deploy cmd's credential.helper echoes — the shipped cmd assumes BUPHA_TOKEN."
+      "description": "NAME of the secret holding the forge token. Injected into node env as BUPHA_TOKEN (gh-pages push credential.helper) and GH_TOKEN (`gh api` inside `lasius forge status create` / `lasius add`). Never the value; the shipped env blocks name BUPHA_TOKEN literally."
     },
     "timeout": {
       "type": "integer",
       "default": 600,
       "minimum": 1,
       "maximum": 600,
-      "description": "Inner shell timeout in seconds (driver cap: 600)."
+      "description": "Inner deploy-command cap in seconds (the deploy node's own shell timeout is 900 to cover lasius setup + cleanup)."
     },
     "context": {
       "type": "string",
       "default": "docs/deploy",
       "pattern": "^[A-Za-z0-9._/-]+$",
-      "description": "GitHub commit-status context posted on the pushed docs-branch sha."
+      "description": "GitHub commit-status context posted on the pushed docs-branch sha (via `lasius forge status create`)."
     },
     "main_ref": {
       "type": "string",
-      "default": "refs/heads/main",
-      "description": "Ref the gen-dependent repos' second worktree checks out at the run root (<run>), so docs:deploy's `cd ..` gen steps (cargo run/doc) see the main checkout. Ignored by the self-contained repos."
+      "default": "origin/main",
+      "description": "Rev the gen-dependent repos' second worktree checks out at the run root (<run>), so docs:deploy's `cd ..` gen steps (cargo run/doc) see the main checkout. Remote-tracking (`origin/main`) so it reflects the last `lasius vcs fetch` — a local refs/heads/main can lag. Ignored by the self-contained repos."
     },
     "cmd": {
       "type": "string",

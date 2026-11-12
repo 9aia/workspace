@@ -20,14 +20,13 @@ Two repo shapes, one campaign:
   steps that `cd ..` into the main checkout for `cargo run` /
   `cargo doc`: `9aia/myco`, `9aia/tamias`, `9aia/cuora`, `9aia/pavo`,
   `9aia/hypha`, `9aia/sturn`, `9aia/kuda`, `9aia/mimus`, `9aia/bupha`.
-  Their git nodes set `params.dest: "docs-<repo>-<sha>/docs"` +
-  `params.extra_worktrees: [{ref: "${config.main_ref}"}]` (driver-git
-  D6): the docs-branch worktree lands at `<run>/docs`, a second
-  worktree of `refs/heads/main` at `<run>`, and the inner shell's
-  cwd stays the docs worktree — exactly the dev layout (`repo/` +
-  `repo/docs/` worktree), so `cd ..` hits the main checkout and the
-  gen scripts' `docs/…` output paths land back in the docs tree.
-  Both checkouts are destroyed with the run (`keep` retains both).
+  Their deploy nodes build the D6 dual checkout in shell: a
+  `main_ref` worktree at `<run>` plus the docs-branch worktree at
+  `<run>/docs`, with the deploy cmd's cwd the docs worktree —
+  exactly the dev layout (`repo/` + `repo/docs/` worktree), so
+  `cd ..` hits the main checkout and the gen scripts' `docs/…`
+  output paths land back in the docs tree. Both checkouts are
+  destroyed with the run.
 - **Main-branch site** — `9aia/9aia.github.io`: the org site lives on
   `main` (no `docs` branch), so its triplet subscribes
   `push.9aia/9aia.github.io.refs/heads/main.**.*`. Self-contained —
@@ -75,21 +74,39 @@ switch the repo's Pages source from Actions-artifact to the
   `push.<repo>.refs/heads/docs.**.*` — except `9aia.github.io`, which
   subscribes `refs/heads/main` — so main-branch pushes on the other
   repos route but match nothing (ci-gate's territory).
-- **Deploy**: `driver: git` materializes a detached worktree at the
-  pushed sha (clone cache under `worktree_base/.repos`, creds via
-  argv-scoped `http.extraHeader` — never persisted); the inner shell
-  runs `config.cmd` at the worktree root. Gen-dependent repos add a
-  second `extra_worktrees` checkout of `main_ref` at the run root —
-  see "v1 scope" above.
-- **gh-pages auth**: the worktree's `origin` is the reported
-  `clone_url`, so `gh-pages` detects the repo itself. The shipped cmd
+- **Deploy**: each pipeline is a `driver: shell` node that drives
+  **lasius** end-to-end (the org rule: all VCS/forge ops go through
+  lasius — `driver: git`/`driver: github-status` are gone). It
+  clone-if-missing's via `lasius add <clone>` (a no-op when the clone
+  exists under `config.lasius_root`), `lasius vcs fetch`es, then
+  `lasius vcs worktree add --rev <sha>` materializes the detached
+  checkout under `worktree_base/docs-<repo>-<sha>`; an `EXIT` trap
+  `lasius vcs worktree remove`s it. Gen-dependent repos add a second
+  worktree of `config.main_ref` (`origin/main` — remote-tracking, so
+  it reflects the last fetch) at the run root `<run>` *before* the
+  nested `<run>/docs` docs-branch checkout — the same D6 layout the
+  git driver's `extra_worktrees` produced; teardown removes
+  `docs/` first, then the run root. The deploy command itself
+  (`config.cmd`) is the repo's own `docs:deploy` — unchanged.
+- **Secrets**: node `env:` injects `BUPHA_TOKEN` (the shipped cmd's
+  gh-pages `credential.helper` reads `$BUPHA_TOKEN`) and `GH_TOKEN`
+  (`gh api` inside `lasius forge`/`lasius add`) from
+  `secret.BUPHA_TOKEN` — secret *values* still never appear in the
+  campaign.
+- **gh-pages auth**: the worktree's `origin` is the lasius clone's
+  own remote, so `gh-pages` detects the repo itself. The shipped cmd
   exports an env-scoped `credential.helper` (reads `$BUPHA_TOKEN`)
   plus author/committer env — the token never lands in any git
   config, and `GIT_CONFIG_*` env propagates into gh-pages' internal
   git invocations. If you override `cmd`, keep that export.
-- **Statuses**: `pending` on gate, verdict (`done`→success,
-  `failed`→failure, `failed.<sha>` materialization→error via
-  `docs.failmap`) under context `docs/deploy`.
+- **Statuses**: `pending` on gate, verdict (`done.*`→success,
+  `failed.*`→failure) under context `docs/deploy`, posted by
+  `lasius forge status create` (`gh api repos/{o}/{r}/statuses/{sha}`).
+  Event types now carry the sha — `docs.<repo>.done.<sha>` /
+  `docs.<repo>.failed.<sha>` — because shell events have no
+  `payload.sha` for the status node to template (pr-heal's `*.{sha}`
+  convention); `on:` subscriptions use the `.*` wildcards. Spawn-level
+  `node.failed`s still route through `docs.failmap`.
 - **Supersede**: `{repo}:{ref}` latest-wins, `cancel_running: true`.
 
 ## Install + deploy (tamias provider flow)
@@ -127,9 +144,38 @@ URL) and adding the missing `BUPHA_WH_9AIA_*` values to
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `worktree_base` | `~/.local/share/peregrin/worktrees` | `driver-git` `base` |
-| `token_env` | `BUPHA_TOKEN` | Secret **name** for clone auth + gh-pages push + statuses |
-| `timeout` | `600` | Inner shell timeout, seconds |
-| `context` | `docs/deploy` | Commit-status context |
-| `main_ref` | `refs/heads/main` | Ref checked out at `<run>` for gen-dependent repos' dual-checkout |
+| `worktree_base` | `~/.local/share/peregrin/worktrees` | Base dir for `docs-<repo>-<sha>` worktree runs |
+| `lasius_root` | `/home/luis/GitHub/9aia/workspace` | lasius `--root` — clone names resolve under `<root>/repos/` |
+| `token_env` | `BUPHA_TOKEN` | Secret **name** injected as `BUPHA_TOKEN` + `GH_TOKEN` |
+| `timeout` | `600` | Inner deploy-command cap, seconds (node shell cap: 900) |
+| `context` | `docs/deploy` | Commit-status context (via `lasius forge status create`) |
+| `main_ref` | `origin/main` | Rev checked out at `<run>` for gen-dependent repos' dual-checkout |
 | `cmd` | see `main.yaml` | Deploy command at the worktree root |
+
+## Migration note (lasius boundaries)
+
+This bundle was migrated off `driver: git` + `driver:
+github-status` onto lasius verbs — every clone/fetch/worktree/status
+call is now `lasius vcs …` / `lasius forge status create` inside
+`driver: shell` nodes (same pattern as `workflows/pr-heal`).
+Semantic deltas vs the git driver:
+
+- **Clone source**: worktrees come from the lasius workspace clone
+  (`<lasius_root>/repos/<name>`), not a private bare-clone cache under
+  `worktree_base/.repos` keyed on the webhook `clone_url`. The clone
+  must exist (or be clonable via `lasius add`, which needs `gh repo
+  list` access); fetch/push auth is whatever the clone's own remote
+  uses — the old argv-scoped `http.extraHeader` token injection is
+  gone.
+- **`main_ref`**: now `origin/main` (remote-tracking, fresh after
+  `lasius vcs fetch`) instead of `refs/heads/main` — the old driver
+  fetched `+refs/heads/*:refs/heads/*` into its bare cache so its
+  `refs/heads/main` *was* remote-fresh; a lasius clone's local
+  `refs/heads/main` can lag.
+- **Event types**: `docs.<repo>.done`/`.failed` →
+  `docs.<repo>.done.<sha>`/`.failed.<sha>` (sha in the type — shell
+  events carry no `payload.sha`). Anything subscribing to the bare
+  types must move to the `.*` wildcard.
+- **Status auth**: `lasius forge status create` shells `gh api`,
+  authed by `GH_TOKEN` (injected from `secret.BUPHA_TOKEN`) — same
+  token, different transport (gh CLI vs raw REST).
