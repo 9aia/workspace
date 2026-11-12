@@ -2,7 +2,7 @@
 # P-009). `tamias install <ref>` fetches this; the bundle's main.yaml
 # is a complete campaign (ingress webhook node included — see below).
 name: docs-deploy
-version: "0.2.0"
+version: "0.2.1"
 # `peregrin-bundle` routes install/deploy/uninstall through
 # `tamias-driver-peregrin` (capabilities: types ["peregrin-bundle"]).
 type: peregrin-bundle
