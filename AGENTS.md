@@ -36,6 +36,10 @@ inside.
 | `repos/9aia.github.io` | Gaia's website |
 | `repos/.github` | org profile + community health |
 
+Org-level shared content lives at the workspace root: `workflows/`
+(peregrin campaign bundles) and `libraries/` (tamias packs — e.g.
+`secrets-9aia`, the org sealed-secrets pack).
+
 ## Cross-repo rules
 
 - Sibling clones live at `repos/<name>`; `../<repo>` references inside
