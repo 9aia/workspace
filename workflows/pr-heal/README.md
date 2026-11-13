@@ -6,9 +6,11 @@ A tamias-installable peregrin campaign bundle. When a pull request's CI
 check fails, an agent session (sepia — `devin` by default) gets a
 detached worktree at the failing head, reproduces the failure, fixes
 the root cause, and leaves the tree dirty; the campaign commits and
-pushes through lasius, waits for the next CI result via GitHub
-webhooks (no polling), and squash-merges through lasius forge once the
-check on the *current* head sha is green.
+pushes through lasius, waits for the next CI result via the bupha
+worker's `ci.job.completed` event (POST `/api/events/inject` on the
+campaign listener — no polling, no forge status round-trip), and
+squash-merges through lasius forge once the check on the *current*
+head sha is green.
 
 Validated end-to-end in the disposable `luisfuturist/pr-heal-spike`
 repo — PR #3 went red → healed → green → merged entirely
@@ -32,12 +34,28 @@ No raw `git`/`gh`/`devin` anywhere in `main.yaml`.
    `ci-job` entities resolve (`~/.config/bupha/bundles/*.toml`, same
    as ci-ingress/ci-gate).
 
-2. **Webhook secret** — register a GitHub webhook on the repo pointing
-   at the shared listener's public URL (`https://tamias.luisfuturist.com/hook`
-   on this deployment) with events `push`, `pull_request`,
-   `check_run`, `status`. Put the HMAC secret in the campaign env as
-   `BUPHA_WH_<OWNER>_<REPO>` (uppercased, `-` → `_`), e.g.
-   `BUPHA_WH_9AIA_MY_REPO` in `~/.config/peregrin/env`.
+2. **Webhook secret + events feed** — register a GitHub webhook on the
+   repo pointing at the shared listener's public URL
+   (`https://tamias.luisfuturist.com/hook` on this deployment) with
+   events `push` and `pull_request` — those are the only forge
+   deliveries this campaign consumes (CI *completion* no longer
+   rides forge `status`/`check_run` webhooks; see below). Put the
+   HMAC secret in the campaign env as `BUPHA_WH_<OWNER>_<REPO>`
+   (uppercased, `-` → `_`), e.g. `BUPHA_WH_9AIA_MY_REPO` in
+   `~/.config/peregrin/env`.
+
+   The completion channel is the bupha worker's `ci.job.completed`
+   emit: set `[worker] events_url` (or `BUPHA_WORKER_EVENTS_URL`) in
+   the bupha fleet config to the campaign listener's ingest route —
+   `http://127.0.0.1:29173/api/events/inject` on this deployment —
+   and keep `node_token_env = "PEREGRIN_TOKEN"` (the campaign
+   listener's `/api/events/inject` accepts the same bearer). The
+   route fans the event into every hosted campaign's trigger
+   channel, scoped optionally by `"campaign": "<name>"`. Requires a
+   peregrin new enough to serve `/api/events/inject` on `campaign
+   serve` (the shared listener) — older builds only expose it on
+   `peregrin serve`'s entity plane, which supervised campaigns
+   never see.
 
 3. **Configure + install** — `tamias install --allow-drivers
    <path-to-bundle>` then `tamias deploy`. Deploy renders
@@ -54,7 +72,7 @@ No raw `git`/`gh`/`devin` anywhere in `main.yaml`.
    | `agent` / `agent_mode` | no | sepia agent id + ACP mode (`bypass` default — see below) |
    | `max_agent_attempts` | no | per-PR heal cap (default 3, durable ledger) |
    | `max_conflict_attempts` | no | per-PR conflict-resolution cap (default 2, durable ledger) |
-   | `ci_check_name` | no | `check_run.name` to react to (default `ci`) |
+   | `ci_check_name` | no | label used in the agent prompt (default `ci`) — `ci.job.completed` carries no per-check name; the bupha job `key` (`repo` or `repo:<job>`) is the lane identity |
    | `default_branch` | no | push-enqueue gate (default `main`) |
    | `worktree_base`, `node_url`, `lasius_root` | no | paths/URLs |
 

@@ -5,7 +5,7 @@
   "properties": {
     "repo": {
       "type": "string",
-      "description": "Watched repository as owner/name — REQUIRED per deployment. Drives the webhook repo filter and the status-event repo check.",
+      "description": "Watched repository as owner/name — REQUIRED per deployment. Drives the webhook repo filter and the ci.job.completed repo/key check.",
       "default": ""
     },
     "webhook_secret_env": {
@@ -50,7 +50,7 @@
     },
     "ci_check_name": {
       "type": "string",
-      "description": "check_run.name the campaign reacts to (the CI job name).",
+      "description": "CI job lane name used in the agent prompt. ci.job.completed carries no per-check name — the bupha job key (repo or repo:<job>) is the lane identity; repo:* lanes under the watched repo are all accepted.",
       "default": "ci"
     },
     "default_branch": {

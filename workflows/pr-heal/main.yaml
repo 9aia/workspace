@@ -7,8 +7,8 @@
 # session (via the node's POST /api/sessions/run), peregrin owns only
 # event routing. No raw git/gh/devin anywhere in this file.
 #
-# Flow (two CI dialects, one downstream):
-#   check_run(completed) | status(ci/bupha) ──route──► green.<sha> ──►
+# Flow (one completion channel — ci.job.completed):
+#   ci.job.completed ──route──► green.<sha> ──►
 #   merge (verify PR head == sha, squash+delete-branch via lasius forge)
 #                          ├──► merged.<sha> / skipped.<sha> (report)
 #                          ├──► failed.<sha> (non-conflict — report)
@@ -19,20 +19,35 @@
 #                               sepia run (merge base, resolve, no
 #                               commit/push) ──► commit + push
 #                               HEAD:pr-branch ──► cleanup worktree ──►
-#                               (CI re-runs → next status/check_run)
+#                               (CI re-runs → next ci.job.completed)
 #   route also emits failed.<sha> (CI red) ──► worktree@sha
 #                               (detached; PR lookup is the gate) ──►
 #                               attempt ledger (per-PR cap) ──►
 #                               sepia run (fix, no commit) ──►
 #                               commit + push HEAD:pr-branch ──►
 #                               cleanup worktree ──►
-#                               (CI re-runs → next status/check_run)
+#                               (CI re-runs → next ci.job.completed)
+#
+# Completion signal: the bupha ci-job worker POSTs
+# `ci.job.completed` to the campaign host's `/api/events/inject`
+# (campaign serve's shared listener — `[worker] events_url` in the
+# bupha fleet config points it there) on every terminal
+# ci.complete {success,failure,cancelled}. Forge `status`/`check_run`
+# webhooks are NO LONGER the completion channel — the forge webhook
+# below only feeds push/pull_request → ci-job enqueue. PR
+# correlation is unchanged: every downstream node still resolves the
+# open PR by exact head_sha via `lasius forge pr list` (the event
+# carries repo+sha+key, no PR number — the payload has no forge PR
+# identity, so head-sha lookup remains the correlation mechanism).
 #
 # Ingress filtering lives in the webhook driver, NOT shell gates:
 # `push_refs` drops non-default-branch pushes at the door (a shell
 # gate's emitted event carries only {stdout,rc,cmd} — the payload the
 # enqueue node needs would be lost), and `pull_request_actions` limits
-# PR deliveries to open/update actions.
+# PR deliveries to open/update actions. `check_run_actions` stays
+# only to keep completed-check deliveries from injecting unrouted
+# events — nothing subscribes `check_run`/`check_suite`/`status`
+# anymore.
 #
 # Data flow: the sha rides the emitted event TYPE (`*.{sha}` →
 # `${event.match.1}`); every node re-derives what it needs (PR lookup,
@@ -83,7 +98,9 @@ config:
   # Per-PR cap on conflict-resolution attempts — counted in
   # <worktree_base>/attempts/pr-<n>-conflicts, survives restarts.
   max_conflict_attempts: 2
-  # The GHA job name the campaign reacts to (check_run.name).
+  # The CI job lane name used in the agent prompt. ci.job.completed
+  # carries no per-check name — the bupha job `key` (repo or
+  # repo:<job>) is the lane identity; this only labels the prompt.
   ci_check_name: "ci"
   # Default branch — push events on other refs never enqueue ci-jobs
   # (PR branches are covered by pull_request deliveries).
@@ -106,6 +123,29 @@ capabilities:
   secrets:
     - PEREGRIN_TOKEN
     - BUPHA_WH_*
+
+# Declared event contracts. `ci.job.completed` is EXTERNAL — no node
+# emits it; the bupha ci-job worker POSTs it to the campaign host's
+# `/api/events/inject` (campaign serve's shared listener) and it
+# lands on the trigger channel like a webhook delivery. Declared
+# here so `campaign validate` wires pr-heal.route's subscription and
+# the payload shape is documented. Payload (entity_worker.rs):
+# {job, key, repo, ref, sha, event, sender, deliveryId, result,
+# attempt} — `key` is the ci-job lane (`owner/name` or
+# `owner/name:job`), `result` ∈ success|failure|cancelled.
+events:
+- type: ci.job.completed
+  fields:
+    job: string
+    key: string
+    repo: string
+    ref: string
+    sha: string
+    event: string
+    sender: string
+    deliveryId: string
+    result: string
+    attempt: number
 
 # No supersede: push and pull_request deliveries for the same commit
 # share (repo, sha) — keying on that would cancel the ci-job enqueue.
@@ -134,8 +174,10 @@ nodes:
     repos:
     - name: "${config.repo}"
       secret_env: "${config.webhook_secret_env}"
-    # Only completed check_runs route — pending/in_progress deliveries
-    # are dropped at the door.
+    # Completed check_run deliveries still inject (the driver parses
+    # them) but nothing subscribes check_run/check_suite/status —
+    # completion arrives via ci.job.completed. The filter stays so
+    # pending/in_progress deliveries drop at the door too.
     check_run_actions: [completed]
     # PR lifecycle we CI: new heads and updates; closed/merged would
     # enqueue jobs for already-dead refs.
@@ -151,10 +193,10 @@ nodes:
 # --- enqueue: push/pull_request → ci-job entity (bupha worker) ---------
 # Same contract as libraries/ci-ingress: create IS ci.enqueue; the
 # deterministic entity id dedups replays. The bupha worker claims the
-# job, runs the repo's CI script in a detached worktree, and posts a
-# commit status — which arrives back here as a `status` webhook event
-# (routed below). PR jobs run the head sha but gate on the base ref
-# (bupha's pull_request convention).
+# job, runs the repo's CI script in a detached worktree, and settles
+# ci.complete — whose ci.job.completed emit arrives back here via
+# /api/events/inject (routed below). PR jobs run the head sha but
+# gate on the base ref (bupha's pull_request convention).
 - id: pr-heal.ci.enqueue.push
   driver: http
   on:
@@ -213,16 +255,26 @@ nodes:
         queue: "latest"
         context: "ci/bupha"
 
-# --- route: check_run|status → green.<sha> | failed.<sha> | ignored ----
-# Two CI dialects feed the same downstream: GHA `check_run`
-# (name/app/conclusion/pull_requests) and bupha `status` commit
-# statuses (context/state). Both emit `*.{sha}` so the heal/merge
-# chain is dialect-agnostic.
+# --- route: ci.job.completed → green.<sha> | failed.<sha> | ignored ---
+# The bupha worker's terminal emit — ONE completion channel for every
+# ci-job this campaign's enqueues produce (and any other ci-job on
+# the same node; the repo+key filters scope it back down). Payload
+# fields (see `events:` above): repo/key/sha/result. Filters:
+#   repo == config.repo            — the watched repo only
+#   key == repo | repo:*           — whole-repo lane or a per-job
+#                                    lane under it (the old
+#                                    ci/bupha/* context precedent)
+#   result success → green, failure → failed; anything else
+#                    (cancelled — e.g. a superseded latest-wins job)
+#                    is ignored: a cancelled run never executed, so
+#                    there is nothing to heal or merge on.
+# PR correlation is NOT in the payload — downstream nodes resolve
+# the open PR by exact head_sha via `lasius forge pr list`, same as
+# the forge-webhook path did.
 - id: pr-heal.route
   driver: shell
   on:
-  - check_run
-  - status
+  - ci.job.completed
   emits:
   - pr-heal.check.green.*
   - pr-heal.check.failed.*
@@ -231,33 +283,15 @@ nodes:
   params:
     cmd: |
       set -u
-      TYPE='${event.type}'
-      if [ "$TYPE" = "status" ]; then
-        # bupha commit status — repo/context filters + state verdict.
-        CONTEXT='${event.payload.context}'
-        STATE='${event.payload.state}'
-        [ "${event.payload.repo}" = "${config.repo}" ] || { echo "ignore: repo"; exit 2; }
-        case "$CONTEXT" in
-          ci/bupha|ci/bupha/*) ;;
-          *) echo "ignore: context='$CONTEXT'"; exit 2 ;;
-        esac
-        case "$STATE" in
-          success) exit 0 ;;
-          failure|error) exit 1 ;;
-          *) echo "ignore: state='$STATE'"; exit 2 ;;
-        esac
-      fi
-      NAME='${event.payload.name}'
-      APP='${event.payload.app}'
-      CONCLUSION='${event.payload.conclusion}'
-      PRS='${event.payload.pull_requests}'
-      [ "$NAME" = "${config.ci_check_name}" ] || { echo "ignore: check name='$NAME'"; exit 2; }
-      [ "$APP" = "github-actions" ] || { echo "ignore: app='$APP'"; exit 2; }
-      case "$PRS" in ""|"[]"|"null") echo "ignore: no pull_requests"; exit 2 ;; esac
-      case "$CONCLUSION" in
+      [ "${event.payload.repo}" = "${config.repo}" ] || { echo "ignore: repo='${event.payload.repo}'"; exit 2; }
+      case "${event.payload.key}" in
+        "${config.repo}"|"${config.repo}:"*) ;;
+        *) echo "ignore: key='${event.payload.key}'"; exit 2 ;;
+      esac
+      case "${event.payload.result}" in
         success) exit 0 ;;
-        failure|cancelled|timed_out|action_required|startup_failure|stale) exit 1 ;;
-        *) echo "ignore: conclusion='$CONCLUSION'"; exit 2 ;;
+        failure) exit 1 ;;
+        *) echo "ignore: result='${event.payload.result}'"; exit 2 ;;
       esac
     emit:
       '0': "pr-heal.check.green.${event.payload.sha}"
@@ -439,9 +473,9 @@ nodes:
       set -euo pipefail
       SHA='${event.match.1}'
       WT="${config.worktree_base}/${SHA:0:12}"
-      # Both CI dialects can emit failed.<sha> for the same sha
-      # (check_run + status) — the per-sha lock keeps a second fire
-      # from starting a parallel agent on the same worktree. Held only
+      # A retried/duplicated ci.job.completed for the same sha (or a
+      # second lane reporting on it) must not start a parallel agent
+      # on the same worktree. The per-sha lock is held only
       # for the duration of the call: a failed attempt releases it so
       # `retry` can reacquire.
       LOCK="${config.worktree_base}/${SHA:0:12}.agent-lock"

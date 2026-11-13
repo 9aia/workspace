@@ -8,12 +8,14 @@
 # session (POST /api/sessions/run → sessions.prompt_wait), peregrin
 # owns only event routing, bupha runs the CI job, tamias distributes.
 name: pr-heal
-version: "0.2.0"
+version: "0.3.0"
 type: peregrin-bundle
 description: >-
-  CI failure → sepia agent fix → push → verified green check →
-  squash merge via lasius forge. Event-driven (GitHub webhooks, no
-  polling); per-PR attempt ledger; worktree cleanup on push/close.
+  CI failure → sepia agent fix → push → verified green →
+  squash merge via lasius forge. Event-driven: forge webhooks
+  enqueue ci-jobs, the bupha worker's ci.job.completed event
+  (POST /api/events/inject) drives heal/merge — no polling;
+  per-PR attempt ledger; worktree cleanup on push/close.
 
 provider:
   # SHARED provider identity — same as ci-gate/ci-ingress/docs-deploy:
