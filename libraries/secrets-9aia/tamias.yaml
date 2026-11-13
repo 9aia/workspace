@@ -11,8 +11,10 @@
 #   tamias-driver-cuora recipients secrets-9aia            # public keys
 #
 # Refs: `cuora://secrets-9aia/registry-token` resolves through the
-# installed pack once `cuora://` pack-ref resolution lands; until then
-# the driver verbs above are the consumption path.
+# installed pack — the engine falls back to installed sealed packs on
+# vault miss (vault-first ordering), so consumers get the pack value
+# transparently via `cuora get`/`cuora run -s`/`cuora env`. The driver
+# verbs above remain the explicit path.
 #
 # Sealed secrets (logical name → vault origin):
 #   registry-token — the tamias org-registry bearer
@@ -20,6 +22,9 @@
 #     identically under all four envs — env-agnostic, so one sealed
 #     copy retires the vault/env ambiguity; see tamias/tamias.yml
 #     T-037 note). Consumers inject it as TAMIAS_REGISTRY_TOKEN.
+#     Convention: plaintexts are stored WITHOUT a trailing newline
+#     (vault semantics); v1.0.0 accidentally sealed a trailing-\n
+#     variant — v1.0.1 reseals the vault-exact bytes.
 #
 # Recipients: sealed TO the operator age identity
 # (age15m8lntktl0cdva9y0ww44jgkq4epzuy5v0klgdg0d0jkh55nu4kq3ghjnc) —
@@ -39,7 +44,7 @@
 # prints the sealed: block merged below. NEVER commit plaintext —
 # the publish/install ciphertext gate rejects non-.age payloads.
 name: secrets-9aia
-version: "1.0.0"
+version: "1.0.1"
 type: secrets
 description: >-
   9aia org-domain secrets, age-sealed (ADR-0004). Carries the tamias
