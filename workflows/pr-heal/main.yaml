@@ -95,12 +95,17 @@ config:
 
 # Secret NAMES only — values live in ~/.config/peregrin/env (or cuora).
 # PEREGRIN_TOKEN always; the webhook HMAC env var named by
-# config.webhook_secret_env must ALSO be present (declared here under
-# its conventional name is not possible — it is per-deployment, so the
-# operator adds it to this list when wiring a repo).
+# config.webhook_secret_env must ALSO be declared — the cuora/keyring
+# secret legs are `declared_only`, so an undeclared name resolves ONLY
+# via the plaintext env file (empty since the cuora migration → the
+# ingress node fails `secret unresolved` and the campaign silently
+# never registers its demux route). The BUPHA_WH_* glob covers the
+# per-deployment `webhook_secret_env` convention; a deployment using a
+# non-conventional name adds it via a deploy.d capabilities fragment.
 capabilities:
   secrets:
     - PEREGRIN_TOKEN
+    - BUPHA_WH_*
 
 # No supersede: push and pull_request deliveries for the same commit
 # share (repo, sha) — keying on that would cancel the ci-job enqueue.
