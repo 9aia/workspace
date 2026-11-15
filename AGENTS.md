@@ -84,6 +84,43 @@ Org-wide documentation standard — applies to every repo:
 - **Content matters** — audit narrative and structure (what/why/boundary,
   Diátaxis quadrant purity), not just factual drift.
 
+### Docs content system
+
+Diátaxis quadrants are fixed; this governs what each page must contain.
+
+Reader model — every page serves one journey: **evaluator** (index,
+5-minute what/why/boundary), **new user** (tutorials → how-to),
+**maintainer/agent** (explanation → reference).
+
+- **`index.md`** — what/why/boundary plus a router: which quadrant
+  answers which goal.
+- **`tutorials/`** — exactly one golden path per repo: scenario →
+  install → first artifact → real use → what you now know. Learn by
+  doing; no reference dumps. A second tutorial demotes to how-to.
+- **`how-to/`** — atomic task recipes titled as tasks. Required shape:
+  goal → prerequisites → numbered steps with real commands →
+  verification ("you should see X") → deeper link.
+- **`explanation/`** — fixed set for engine repos:
+  - `architecture.md` — the mental model: components, data flow,
+    ports table, crate-map splice. Opens with the idea, never
+    provenance.
+  - `concepts.md` — domain vocabulary, each term defined once.
+  - `boundaries.md` — owns / doesn't-own, neighbors named (fold into
+    architecture if <40 lines).
+  - `decisions.md` — ADR-lite: decision → alternatives → consequence.
+  - `flow.md` — optional but encouraged: one end-to-end narrative of a
+    real operation.
+  - `security.md` — only where a real threat surface exists.
+- **Ecosystem position** — every engine repo's explanation carries a
+  "Where it sits" block placing it in the tamias → engines →
+  orchestration → surfaces hierarchy.
+- **Coverage bar** — engine repo: index + 1 tutorial + ≥3 how-tos +
+  the explanation set + generated reference. Library/content repos:
+  index + architecture + concepts + reference. Site/ledger repos are
+  exempt via `cypera.toml [check] skip`.
+- **`cypera check`** enforces the mechanical parts (required pages per
+  profile, quadrant links, tutorial count); substance stays editorial.
+
 ## Workspace commands
 
 Managed by [lasius](https://github.com/9aia/lasius) — `lasius.toml`
