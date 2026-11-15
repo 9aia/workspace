@@ -34,11 +34,11 @@ Every repo carries a `docs/` worktree — VitePress + Diátaxis.
 
 | Path | Holds |
 | --- | --- |
-| `index.md` | what / why / boundary + quadrant links |
-| `tutorials/` | learning-oriented paths |
-| `how-to/` | task-oriented recipes |
+| `index.md` | what / why / boundary + a router to the quadrants |
+| `tutorials/` | exactly one golden path — scenario → install → first artifact → real use → what you now know |
+| `how-to/` | atomic task recipes — goal → prerequisites → steps → verification → deeper link |
 | `reference/` | GENERATED ONLY — cli / config / crate-api, with a "do not edit" banner |
-| `explanation/` | design rationale |
+| `explanation/` | the mental model — architecture, concepts, boundaries, decisions (+ optional `flow.md`) |
 
 Nav order: **Get started → Tutorials → How-to → Reference → Explanation**.
 
@@ -52,8 +52,9 @@ Nav order: **Get started → Tutorials → How-to → Reference → Explanation*
 ## Rules
 
 - **Generated, not handwritten** — crate maps, CLI references, and config
-  fields come from `docs/gen-*.py` scripts rendered from source. Repos
-  without generators get them; drift is a bug.
+  fields come from [`cypera`](https://9aia.com/cypera/) (`cypera gen
+  crate-map|cli|config|api`) driven by each repo's `cypera.toml`. Drift is
+  a bug; `docs:check` regenerates and diffs.
 - **Status honesty** — "scaffold" / "wip" / "pending" only if true today;
   verify against code before writing.
 - **No `CHANGELOG.md`** — git history + tarsi release notes are the
@@ -62,6 +63,34 @@ Nav order: **Get started → Tutorials → How-to → Reference → Explanation*
   code.
 - **Content matters** — audit narrative and structure (what/why/boundary,
   Diátaxis quadrant purity), not just factual drift.
+
+## Content system
+
+Diátaxis fixes the quadrants; this fixes what each page must contain.
+Every page serves one reader journey: **evaluator** (index — what/why/
+boundary in five minutes), **new user** (tutorials → how-to),
+**maintainer/agent** (explanation → reference).
+
+- **`index.md`** — what/why/boundary plus a router: which quadrant
+  answers which goal.
+- **`tutorials/`** — one golden path per repo; a second tutorial demotes
+  to how-to.
+- **`how-to/`** — task-titled recipes with a verification step.
+- **`explanation/`** — engine repos carry `architecture.md` (the mental
+  model — opens with the idea, never provenance), `concepts.md`
+  (vocabulary), `boundaries.md` (owns / doesn't-own), `decisions.md`
+  (decision → alternatives → consequence), and optionally `flow.md`
+  (one end-to-end narrative).
+- **Ecosystem position** — every engine repo's explanation carries a
+  "Where it sits" block in the tamias → engines → orchestration →
+  surfaces hierarchy.
+- **Coverage bar** — engine: index + 1 tutorial + ≥3 how-tos + the
+  explanation set + generated reference. Library/content repos run a
+  lighter profile declared in `cypera.toml [check] profile`.
+
+`cypera check` enforces the mechanical parts — required pages per
+profile, index router links, tutorial count, no orphan
+`getting-started.md`, generated freshness. Substance stays editorial.
 
 ## Ecosystem
 
