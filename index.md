@@ -14,7 +14,7 @@ hero:
 features:
   - title: Config-only
     details: lasius.toml is the source of truth — org, private repos, excludes. Everything else is generated.
-  - title: 22 repos, one root
+  - title: Every org repo, one root
     details: repos/ holds independent clones — no submodules, each keeps its own history, branches, and remotes.
   - title: Editor-ready
     details: 9aia.code-workspace is generated on demand — open the whole org as one multi-root workspace.
