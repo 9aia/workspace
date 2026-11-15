@@ -77,7 +77,8 @@ Org-wide documentation standard — applies to every repo:
 - **Docs sites** — every repo has a `docs/` worktree (VitePress +
   Diátaxis); deploy to GitHub Pages only for public repos
   (`https://9aia.com/<repo>/`). Private repos keep the site source,
-  no deploy.
+  no deploy. The first nav item is always the org link:
+  `{ text: "9aia", link: "https://9aia.com", target: "_blank" }`.
 - **SECURITY.md / CONTRIBUTING.md** — house style where the repo ships code.
 - **No CHANGELOG.md** — git history + tarsi release notes are the
   changelog; do not add or keep one.
