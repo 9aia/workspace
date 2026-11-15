@@ -64,6 +64,9 @@ current directory.
 | `repos/peregrin`           | Event-driven orchestration — campaigns of agent workflows, multi-machine |
 | `repos/bupha`              | Queue engine for event-driven jobs — shipped as CI                      |
 | `repos/cicada`             | Scheduled-work engine — calendars and recurring agent runs              |
+| `repos/scarab`             | Config & template expertise — generic config loading, templated packs    |
+| `repos/tarsi`              | Release plane — plan/changelog/bump/tag/publish/release ops              |
+| `repos/hypha`              | Distributed substrate — entities, ops, snapshots, locks across machines  |
 | `repos/pavo`               | Agent UI / views layer                                                  |
 | `repos/atta`               | Fungus-garden layer — tended architecture: crates, moves, drift (WIP)   |
 | `repos/project`            | Org ledger — cross-repo proposals, plans, ADRs (myco, private)          |

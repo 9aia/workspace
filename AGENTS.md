@@ -21,6 +21,7 @@ inside.
 | `repos/peregrin` | event-driven orchestration — campaigns, multi-machine |
 | `repos/bupha` | CI integration for tamias (`type: bupha`) — queue → worktree → runner (`shell`/`dagger`/`gha`) → forge status |
 | `repos/cicada` | scheduled-work engine — calendars, recurring runs |
+| `repos/hypha` | distributed substrate — entities, ops, snapshots, locks across machines |
 | `repos/scarab` | config & template expertise — generic config loading libs, templated content packs via tamias (P-017) |
 | `repos/tarsi` | release plane — `tarsi-serve` ops (plan/changelog/bump/tag/publish/release); `type: tarsi` profile packs (`libraries/9aia-release`), peregrin `libraries/release` campaigns (P-013/PL-014, ADR-0005) |
 | `repos/pavo` | agent UI / views |
