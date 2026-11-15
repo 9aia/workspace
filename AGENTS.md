@@ -58,6 +58,31 @@ Org-level shared content lives at the workspace root: `workflows/`
 - English everywhere (code, comments, commit messages).
 - Never edit `node_modules`, `target/`, or generated files.
 
+## Docs contract
+
+Org-wide documentation standard — applies to every repo:
+
+- **README.md** — succinct, helpful, clear. What it is + why + quickstart.
+  No crate tables, verb dumps, or status essays; link to AGENTS.md/docs for depth.
+- **AGENTS.md** — the agent/dev map: layout, commands, rules, boundary.
+  Crate/verb tables allowed but must match source exactly — generated where
+  a generator exists, audited otherwise.
+- **Generated, not handwritten** — crate maps, CLI references, config
+  fields come from `docs/gen-*.py` scripts rendered from source. Repos
+  without generators get them; drift is a bug.
+- **Status honesty** — "scaffold"/"wip"/"pending" only if true today;
+  verify against code before writing.
+- **Docs sites** — every repo has a `docs/` worktree (VitePress +
+  Diátaxis); deploy to GitHub Pages only for public repos
+  (`https://9aia.com/<repo>/`). Private repos keep the site source,
+  no deploy.
+- **SECURITY.md / CONTRIBUTING.md** — house style where the repo ships code.
+- **No CHANGELOG.md** — git history + tarsi release notes are the
+  changelog; do not add or keep one.
+- **Versions** live in pack manifests only, never prose.
+- **Content matters** — audit narrative and structure (what/why/boundary,
+  Diátaxis quadrant purity), not just factual drift.
+
 ## Workspace commands
 
 Managed by [lasius](https://github.com/9aia/lasius) — `lasius.toml`
