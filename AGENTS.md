@@ -69,8 +69,9 @@ Org-wide documentation standard — applies to every repo:
   Crate/verb tables allowed but must match source exactly — generated where
   a generator exists, audited otherwise.
 - **Generated, not handwritten** — crate maps, CLI references, config
-  fields come from `docs/gen-*.py` scripts rendered from source. Repos
-  without generators get them; drift is a bug.
+  fields, and API docs come from `cypera gen` (`crate-map`/`cli`/`config`/
+  `api`) driven by each repo's `cypera.toml`, rendered from source.
+  `cypera check` fails on drift; `docs:check` regenerates and diffs.
 - **Status honesty** — "scaffold"/"wip"/"pending" only if true today;
   verify against code before writing.
 - **Docs sites** — every repo has a `docs/` worktree (VitePress +
