@@ -18,6 +18,10 @@ export default defineConfig({
         text: "Start",
         items: [{ text: "Introduction", link: "/" }],
       },
+      {
+        text: "Reference",
+        items: [{ text: "Docs contract", link: "/reference/docs-contract" }],
+      },
     ],
     socialLinks: [{ icon: "github", link: "https://github.com/9aia/workspace" }],
   },
