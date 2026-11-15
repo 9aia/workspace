@@ -41,6 +41,8 @@ Every repo carries a `docs/` worktree — VitePress + Diátaxis.
 | `explanation/` | the mental model — architecture, concepts, boundaries, decisions (+ optional `flow.md`) |
 
 Nav order: **Get started → Tutorials → How-to → Reference → Explanation**.
+The first nav item is always the org link: `{ text: "9aia", link:
+"https://9aia.com", target: "_blank" }`.
 
 ## Voice
 
