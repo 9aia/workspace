@@ -39,8 +39,10 @@ inside.
 | `repos/.github` | org profile + community health |
 
 Org-level shared content lives at the workspace root: `workflows/`
-(peregrin campaign bundles) and `libraries/` (tamias packs — e.g.
-`secrets-9aia`, the org sealed-secrets pack).
+(peregrin campaign bundles), `libraries/` (tamias packs — e.g.
+`secrets-9aia`, the org sealed-secrets pack), and `projects.yaml`
+(canonical project catalog — tagline/description/layer/links per repo;
+drives 9aia.com and is mirrored into each repo's docs index).
 
 ## Cross-repo rules
 
