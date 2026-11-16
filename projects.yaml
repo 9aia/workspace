@@ -1,13 +1,13 @@
 # 9aia project catalog : canonical metadata for 9aia.com and repo docs.
 # Schema: name, tagline (<=10 words), description (one sentence),
-# layer (packaging|plane|engine|orchestration|surface), role,
+# layer (delivery|memory|process|agency), role,
 # stage (alpha|beta), status (recent|active|wip|deprecated), order,
 # website (docs site), repo, docs.
 projects:
   - name: tamias
     tagline: "The entrypoint: fetch, store, cache, dispense"
     description: "Package and content manager: every 9aia tool installs and updates through tamias packs."
-    layer: packaging
+    layer: delivery
     role: entrypoint
     stage: beta
     status: recent
@@ -18,7 +18,7 @@ projects:
   - name: scarab
     tagline: "Config loading & templated content packs"
     description: "Config expertise: generic config ports plus templated content packs distributed via tamias."
-    layer: packaging
+    layer: delivery
     role: config-and-templates
     stage: alpha
     status: recent
@@ -29,7 +29,7 @@ projects:
   - name: tarsi
     tagline: "The release plane: changelog to publish"
     description: "Release plane: changelog, semver bump, tag, and publish exposed as tarsi-serve ops."
-    layer: plane
+    layer: delivery
     role: releases
     stage: alpha
     status: recent
@@ -40,7 +40,7 @@ projects:
   - name: bupha
     tagline: "The gate: CI as tamias bundles"
     description: "CI integration: push sources queue per-sha pipeline runs on your box, shipped as tamias bundles."
-    layer: plane
+    layer: delivery
     role: ci-gate
     stage: alpha
     status: recent
@@ -51,7 +51,7 @@ projects:
   - name: myco
     tagline: "The ledger: durable work memory"
     description: "Records engine: a myco CLI owns every write to a repo's markdown work ledger."
-    layer: engine
+    layer: memory
     role: records
     stage: beta
     status: recent
@@ -62,7 +62,7 @@ projects:
   - name: kuda
     tagline: "Repo memory: verified code maps"
     description: "Code-map engine: crawls repos into verified per-module cards agents query instead of re-exploring."
-    layer: engine
+    layer: memory
     role: code-map
     stage: alpha
     status: recent
@@ -73,7 +73,7 @@ projects:
   - name: mimus
     tagline: "The critic: claims verified against code"
     description: "Verification engine: extracts claims from docs and cards, verifies them against the code, repairs the fixable."
-    layer: engine
+    layer: process
     role: verification
     stage: alpha
     status: recent
@@ -84,7 +84,7 @@ projects:
   - name: cuora
     tagline: "Secrets broker: sealed, not spilled"
     description: "Secrets broker: code carries cuora:// references; values materialize as env vars at run time, audited."
-    layer: engine
+    layer: process
     role: secrets
     stage: beta
     status: recent
@@ -95,7 +95,7 @@ projects:
   - name: sturn
     tagline: "The WAL: coordination in milliseconds"
     description: "Ephemeral coordination: claims, ops, and topics over the git object store."
-    layer: engine
+    layer: memory
     role: coordination
     stage: alpha
     status: recent
@@ -106,7 +106,7 @@ projects:
   - name: hypha
     tagline: "Distributed substrate: entities across machines"
     description: "Distributed substrate: a generic entity plane with namespaced ops, snapshots, and locks."
-    layer: engine
+    layer: memory
     role: distributed-substrate
     stage: beta
     status: recent
@@ -117,7 +117,7 @@ projects:
   - name: cicada
     tagline: "Calendars as code: scheduled work"
     description: "Scheduled-work engine: declare calendars in YAML, plan and apply them against live providers."
-    layer: engine
+    layer: process
     role: scheduling
     stage: beta
     status: recent
@@ -128,7 +128,7 @@ projects:
   - name: lasius
     tagline: "Git & workspace expertise"
     description: "Git and workspace expertise: lasius.toml clones and syncs every repo of a GitHub org."
-    layer: engine
+    layer: process
     role: workspace
     stage: beta
     status: recent
@@ -139,7 +139,7 @@ projects:
   - name: sepia
     tagline: "Session lifecycle: agents, agnostically"
     description: "Session lifecycle engine: one canonical IR and pluggable store drivers across coding agents."
-    layer: engine
+    layer: process
     role: sessions
     stage: beta
     status: recent
@@ -150,7 +150,7 @@ projects:
   - name: peregrin
     tagline: "Campaigns: event-driven orchestration"
     description: "Orchestration engine: declarative campaigns of events, nodes, and drivers across your machines."
-    layer: orchestration
+    layer: agency
     role: orchestrator
     stage: beta
     status: recent
@@ -161,7 +161,7 @@ projects:
   - name: pavo
     tagline: "The screen: renders every view"
     description: "Visualization host: renders ViewNode IR trees emitted by tamias drivers across CLI, TUI, and web."
-    layer: surface
+    layer: agency
     role: visualization
     stage: alpha
     status: recent
