@@ -107,6 +107,19 @@ projects:
     docs: https://9aia.com/cuora/
     depends_on: [scarab, tamias, pavo]
     integrates_with: [tarsi, peregrin]
+  - name: tardigrada
+    tagline: "Dormant identity that persists anywhere"
+    description: "Age-identity lifecycle tool: the per-machine, per-human key behind encrypted stores — init, show, import, export, backend over an identity.txt keyfile."
+    layer: process
+    role: identity
+    stage: alpha
+    status: recent
+    order: 16
+    website: https://9aia.com/tardigrada/
+    repo: https://github.com/9aia/tardigrada
+    docs: https://9aia.com/tardigrada/
+    depends_on: [cuora]
+    integrates_with: [tamias, tarsi]
   - name: sturn
     tagline: "The WAL: coordination in milliseconds"
     description: "Ephemeral coordination: claims, ops, and topics over the git object store."

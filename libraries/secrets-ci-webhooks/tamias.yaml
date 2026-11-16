@@ -42,7 +42,8 @@
 # (age15m8lntktl0cdva9y0ww44jgkq4epzuy5v0klgdg0d0jkh55nu4kq3ghjnc) —
 # the only identity on this host today, same set as secrets-9aia.
 # Adding an org member: same runbook as libraries/secrets-9aia —
-# they run cuora identity init, send their PUBLIC key, append to a
+# they run `tardigrada init`, send their PUBLIC key (`tardigrada
+# show`), append to a
 # recipients file, re-seal the FULL set, bump version, republish.
 #
 # Rotation: webhook secrets rotate via `cuora put/rotate

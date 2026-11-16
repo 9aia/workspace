@@ -29,8 +29,9 @@
 # Recipients: sealed TO the operator age identity
 # (age15m8lntktl0cdva9y0ww44jgkq4epzuy5v0klgdg0d0jkh55nu4kq3ghjnc) —
 # the only identity on this host today. Adding an org member:
-#   1. they run the cuora identity init → send you their PUBLIC key
-#      (`age1…`, safe to share — private key never leaves their host);
+#   1. they run `tardigrada init` → send you their PUBLIC key
+#      (`tardigrada show`, `age1…` — safe to share; private key
+#      never leaves their host);
 #   2. append it to a recipients file (one `age1…` per line);
 #   3. re-seal every secret: `tamias-driver-cuora seal --in <dir>
 #      --out <pack> --recipients <file>` (or `--recipient` per key);

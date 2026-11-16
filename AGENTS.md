@@ -17,6 +17,7 @@ inside.
 | `repos/mimus` | verification engine — proofs over agent claims |
 | `repos/sturn` | ephemeral coordination — claims/ops/topics over VCS state |
 | `repos/cuora` | secrets broker — sealed, not spilled |
+| `repos/tardigrada` | age-identity lifecycle — the per-machine, per-human key behind encrypted stores |
 | `repos/sepia` | session lifecycle — start/resume/teardown |
 | `repos/peregrin` | event-driven orchestration — campaigns, multi-machine |
 | `repos/bupha` | CI integration for tamias (`type: bupha`) — queue → worktree → runner (`shell`/`dagger`/`gha`) → forge status |
