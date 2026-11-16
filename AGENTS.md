@@ -82,6 +82,8 @@ Org-wide documentation standard — applies to every repo:
   (`https://9aia.com/<repo>/`). Private repos keep the site source,
   no deploy. The first nav item is always the org link:
   `{ text: "9aia", link: "https://9aia.com", target: "_blank" }`.
+  Every site uses `vitepress-theme-9aia` (`.vitepress/theme/index.ts`
+  re-exports it) with `search.provider: "local"` in themeConfig.
 - **SECURITY.md / CONTRIBUTING.md** — house style where the repo ships code.
 - **No CHANGELOG.md** — git history + tarsi release notes are the
   changelog; do not add or keep one.
