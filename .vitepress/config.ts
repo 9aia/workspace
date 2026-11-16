@@ -8,6 +8,7 @@ export default defineConfig({
   base: "/workspace/",
   head: [["link", { rel: "icon", href: "/workspace/favicon.svg" }]],
   themeConfig: {
+    search: { provider: "local" },
     nav: [
       { text: "Guide", link: "/" },
       { text: "lasius", link: "https://9aia.com/lasius/" },
