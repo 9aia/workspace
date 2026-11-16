@@ -117,7 +117,7 @@ Reader model — every page serves one journey: **evaluator** (index,
   - `security.md` — only where a real threat surface exists.
 - **Ecosystem position** — every engine repo's explanation carries a
   "Where it sits" block placing it in the delivery → memory → process →
-  agency hierarchy (see `projects.yaml` `layer`).
+  interface hierarchy (see `projects.yaml` `layer`).
 - **Coverage bar** — engine repo: index + 1 tutorial + ≥3 how-tos +
   the explanation set + generated reference. Library/content repos:
   index + architecture + concepts + reference. Site/ledger repos are
