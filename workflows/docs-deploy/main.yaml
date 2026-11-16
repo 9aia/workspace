@@ -24,17 +24,18 @@
 #
 # Scope: self-contained docs trees (sepia/peregrin/lasius — the
 # `docs` orphan branch IS the site checkout) plus the gen-dependent
-# repos (myco/tamias/cuora/pavo/hypha/sturn/kuda/mimus) whose
-# `docs:deploy` runs `docs:gen`/`docs:api` steps that `cd ..` into
-# the main checkout for `cargo run`/`cargo doc`. Those pipelines use
-# the D6 dual-checkout layout: the docs-branch worktree lands at
-# `<run>/docs` and a second worktree of `config.main_ref` at `<run>`,
-# so the gen steps see the same layout as a dev checkout. 9aia.github.io
-# is the odd one out: the site lives on `main` (no `docs` branch), so
-# its triplet subscribes `refs/heads/main` — self-contained, single
-# worktree. Its Pages source must be the `gh-pages` branch (was
-# `actions/deploy-pages` artifact deploy — operator switches Pages
-# source once; the built output is identical).
+# repos (myco/tamias/cuora/pavo/hypha/sturn/kuda/mimus/
+# tardigrada) whose `docs:deploy` runs `docs:gen`/`docs:api` steps
+# that `cd ..` into the main checkout for `cargo run`/`cargo doc`.
+# Those pipelines use the D6 dual-checkout layout: the docs-branch
+# worktree lands at `<run>/docs` and a second worktree of
+# `config.main_ref` at `<run>`, so the gen steps see the same
+# layout as a dev checkout. 9aia.github.io is the odd one out: the
+# site lives on `main` (no `docs` branch), so its triplet subscribes
+# `refs/heads/main` — self-contained, single worktree. Its Pages
+# source must be the `gh-pages` branch (was `actions/deploy-pages`
+# artifact deploy — operator switches Pages source once; the built
+# output is identical).
 #
 # Event contract: deploy nodes emit `docs.<repo>.done.<sha>` /
 # `docs.<repo>.failed.<sha>` (the sha rides the type, pr-heal style —
@@ -106,6 +107,7 @@ capabilities:
     - BUPHA_WH_9AIA_MIMUS
     - BUPHA_WH_9AIA_BUPHA
     - BUPHA_WH_9AIA_GITHUB_IO
+    - BUPHA_WH_9AIA_TARDIGRADA
 
 annotations:
   title: Docs deploy
@@ -153,6 +155,8 @@ nodes:
           secret_env: BUPHA_WH_9AIA_MIMUS
         - name: 9aia/9aia.github.io
           secret_env: BUPHA_WH_9AIA_GITHUB_IO
+        - name: 9aia/tardigrada
+          secret_env: BUPHA_WH_9AIA_TARDIGRADA
 
   # Route every verified push as a typed event
   # `push.<repo>.<ref>.<clone_url>.<sha>` — `on:` matches types only,
@@ -1438,6 +1442,124 @@ nodes:
           --json >/dev/null
       emit:
         "0": "docs.9aia-mimus.status-posted"
+
+  # 9aia/tardigrada — gen-dependent: D6 dual checkout, docs-branch
+  # worktree at <run>/docs + main_ref worktree at <run>.
+  - id: docs.9aia-tardigrada
+    driver: shell
+    on: [push.9aia/tardigrada.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-tardigrada.done.*, docs.9aia-tardigrada.failed.*]
+    params:
+      # Node cap covers lasius setup (fetch + worktree(s)) +
+      # the config.timeout inner deploy + cleanup; the inner
+      # cmd's own cap is config.timeout (600).
+      timeout: 900
+      env:
+        BUPHA_TOKEN: "${secret.BUPHA_TOKEN}"
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        # Shas are hex — refuse anything else before it can
+        # steer the worktree path (rm -rf below).
+        case "$SHA" in ''|*[!0-9a-fA-F]*) echo "bad sha '$SHA'"; exit 1 ;; esac
+        REPO='tardigrada'
+        # `~` doesn't expand inside "$VAR/…" — expand a
+        # leading tilde via sed (`${}`-free so the campaign
+        # template doesn't eat the bash expansion).
+        expand_tilde() { printf '%s' "$1" | sed "s|^~|$HOME|"; }
+        ROOT=$(expand_tilde '${config.lasius_root}')
+        BASE=$(expand_tilde '${config.worktree_base}')
+        RUN="$BASE/docs-tardigrada-$SHA"
+        DOCS="$RUN/docs"
+        mkdir -p "$BASE"
+        # Clone-if-missing — `lasius add` is a no-op when the
+        # clone exists (resolves via gh repo list; needs
+        # GH_TOKEN, injected above).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" vcs fetch "$REPO" --json >/dev/null
+        # Stale checkouts from a superseded/killed run —
+        # remove registered worktrees first, then plain-dir
+        # leftovers. Primary (docs/) before the container
+        # run root, same order the git driver tore down.
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$DOCS" --json >/dev/null 2>&1 || true
+        lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$RUN" --json >/dev/null 2>&1 || true
+        [ ! -e "$DOCS" ] || rm -rf "$DOCS"
+        [ ! -e "$RUN" ] || rm -rf "$RUN"
+        # D6 dual checkout: the run root holds the
+        # main_ref worktree FIRST (container before the
+        # nested docs/ checkout — git refuses the reverse).
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$RUN" --rev "${config.main_ref}" --json >/dev/null
+        lasius --root "$ROOT" vcs worktree add "$REPO" --dir "$DOCS" --rev "$SHA" --json >/dev/null
+        cleanup() {
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$DOCS" --json >/dev/null 2>&1 || true
+          lasius --root "$ROOT" vcs worktree remove "$REPO" --dir "$RUN" --json >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+        (
+          cd "$DOCS"
+          ${config.cmd}
+        )
+      emit:
+        "0": "docs.9aia-tardigrada.done.${event.match.2}"
+        default: "docs.9aia-tardigrada.failed.${event.match.2}"
+
+  - id: docs.9aia-tardigrada.pending
+    driver: shell
+    on: [push.9aia/tardigrada.refs/heads/docs.**.*]
+    max_fires: unlimited
+    emits: [docs.9aia-tardigrada.status-posted]
+    params:
+      timeout: 120
+      env:
+        # gh api inside `lasius forge` reads GH_TOKEN.
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.2}'
+        REPO='tardigrada'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        # The status post resolves owner/repo from the clone's
+        # remote — ensure the lasius clone exists first (the deploy
+        # node does the same; `lasius add` is a no-op when present).
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state pending \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-tardigrada.status-posted"
+
+  - id: docs.9aia-tardigrada.status
+    driver: shell
+    on: [docs.9aia-tardigrada.done.*, docs.9aia-tardigrada.failed.*]
+    max_fires: unlimited
+    emits: [docs.9aia-tardigrada.status-posted]
+    params:
+      timeout: 120
+      env:
+        GH_TOKEN: "${secret.BUPHA_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        SHA='${event.match.1}'
+        case '${event.type}' in
+          *.done.*) STATE=success ;;
+          *) STATE=failure ;;
+        esac
+        REPO='tardigrada'
+        ROOT='${config.lasius_root}'
+        ROOT="$(printf '%s' "$ROOT" | sed "s|^~|$HOME|")"
+        [ -d "$ROOT/repos/$REPO/.git" ] || lasius --root "$ROOT" add "$REPO" >/dev/null
+        lasius --root "$ROOT" forge status create "$REPO" \
+          --sha "$SHA" --state "$STATE" \
+          --context "${config.context}" \
+          --description '${event.type}' \
+          --json >/dev/null
+      emit:
+        "0": "docs.9aia-tardigrada.status-posted"
 
   # 9aia/bupha docs deploys run on the bupha-worker `:docs` ci-job
   # lane (ci-ingress → 9aia/bupha:docs → bupha-worker-docs) — not

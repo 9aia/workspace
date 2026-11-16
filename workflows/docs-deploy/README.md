@@ -19,7 +19,8 @@ Two repo shapes, one campaign:
 - **Gen-dependent** — `docs:deploy` runs `docs:gen`/`docs:api`
   steps that `cd ..` into the main checkout for `cargo run` /
   `cargo doc`: `9aia/myco`, `9aia/tamias`, `9aia/cuora`, `9aia/pavo`,
-  `9aia/hypha`, `9aia/sturn`, `9aia/kuda`, `9aia/mimus`, `9aia/bupha`.
+  `9aia/hypha`, `9aia/sturn`, `9aia/kuda`, `9aia/mimus`,
+  `9aia/tardigrada`.
   Their deploy nodes build the D6 dual checkout in shell: a
   `main_ref` worktree at `<run>` plus the docs-branch worktree at
   `<run>/docs`, with the deploy cmd's cwd the docs worktree —
@@ -59,13 +60,17 @@ switch the repo's Pages source from Actions-artifact to the
   thirteen repos; `secret_env` names follow the existing
   `BUPHA_WH_<OWNER>_<REPO>` convention (dots sanitized —
   `9aia.github.io` → `BUPHA_WH_9AIA_GITHUB_IO`) — *names only*, granted via
-  `capabilities.secrets` (`BUPHA_TOKEN` + the thirteen `BUPHA_WH_*`).
+  `capabilities.secrets` (`BUPHA_TOKEN` + the fourteen `BUPHA_WH_*`
+  names — `BUPHA_WH_9AIA_BUPHA` is granted but unwatched: bupha docs
+  deploy on the bupha-worker `:docs` ci-job lane, not this campaign).
   `~/.config/peregrin/env` must carry a `BUPHA_WH_9AIA_<REPO>` value
   per watched repo plus `BUPHA_TOKEN`. As of D6 the env file already
   has `BUPHA_WH_9AIA_{BUPHA,CUORA,KUDA,MIMUS,MYCO,PEREGRIN,STURN}`;
   ops must add `BUPHA_WH_9AIA_{SEPIA,LASIUS,TAMIAS,PAVO,HYPHA}` plus
-  `BUPHA_WH_9AIA_GITHUB_IO` (and
-  confirm `BUPHA_TOKEN`). The webhook node resolves every listed
+  `BUPHA_WH_9AIA_GITHUB_IO` and `BUPHA_WH_9AIA_TARDIGRADA` (and
+  confirm `BUPHA_TOKEN`) — values may also resolve via the cuora
+  chain (`cuora://peregrin/<NAME>`) when absent from the env file;
+  TARDIGRADA's lives there. The webhook node resolves every listed
   `secret_env` at startup, so all thirteen values must exist before
   deploying — a repo whose secret is missing fails the whole
   ingress, not just its own pushes.
