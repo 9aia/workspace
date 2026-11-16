@@ -84,7 +84,7 @@ boundary in five minutes), **new user** (tutorials → how-to),
   (decision → alternatives → consequence), and optionally `flow.md`
   (one end-to-end narrative).
 - **Ecosystem position** — every engine repo's explanation carries a
-  "Where it sits" block in the delivery → memory → process → agency
+  "Where it sits" block in the delivery → memory → process → interface
   hierarchy (canonical layers in `projects.yaml`).
 - **Coverage bar** — engine: index + 1 tutorial + ≥3 how-tos + the
   explanation set + generated reference. Library/content repos run a
@@ -98,7 +98,7 @@ profile, index router links, tutorial count, no orphan
 
 [tamias](https://9aia.com/tamias/) is the entrypoint — everything installs
 and updates through tamias packs. The hierarchy reads
-**delivery → memory → process → agency**.
+**delivery → memory → process → interface**.
 
 ## Deploy
 
