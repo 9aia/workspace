@@ -109,7 +109,7 @@ projects:
     integrates_with: [tarsi, peregrin]
   - name: tardigrada
     tagline: "Dormant identity that persists anywhere"
-    description: "Age-identity lifecycle tool: the per-machine, per-human key behind encrypted stores — init, show, import, export, backend over an identity.txt keyfile."
+    description: "Age-identity lifecycle tool: the per-machine, per-human key behind encrypted stores: init, show, import, export, backend over an identity.txt keyfile."
     layer: process
     role: identity
     stage: alpha
