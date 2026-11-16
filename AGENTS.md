@@ -1,6 +1,6 @@
 # 9aia workspace — agent guide
 
-Metarepo root for the 9aia org (GAIA — open infrastructure for
+Metarepo root for the 9aia org (Gaia — open infrastructure for
 agent-driven development). **Config only** — repo management is
 delegated to [lasius](https://github.com/9aia/lasius) via `lasius.toml`.
 All org repositories are cloned under `repos/` (gitignored); each is an

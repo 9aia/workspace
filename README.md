@@ -1,7 +1,7 @@
 # 9aia workspace
 
 Metarepo for the [9aia](https://github.com/9aia) GitHub org — config
-only, managed by [lasius](https://github.com/9aia/lasius). GAIA: open
+only, managed by [lasius](https://github.com/9aia/lasius). Gaia: open
 infrastructure for agent-driven development.
 
 `repos/` is gitignored — each entry is an independent clone with its
