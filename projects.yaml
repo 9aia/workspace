@@ -15,6 +15,8 @@ projects:
     website: https://9aia.com/tamias/
     repo: https://github.com/9aia/tamias
     docs: https://9aia.com/tamias/
+    depends_on: [pavo]
+    integrates_with: [cuora, tarsi, sturn]
   - name: scarab
     tagline: "Config loading & templated content packs"
     description: "Config expertise: generic config ports plus templated content packs distributed via tamias."
@@ -26,6 +28,7 @@ projects:
     website: https://9aia.com/scarab/
     repo: https://github.com/9aia/scarab
     docs: https://9aia.com/scarab/
+    integrates_with: [tamias, tarsi]
   - name: tarsi
     tagline: "The release plane: changelog to publish"
     description: "Release plane: changelog, semver bump, tag, and publish exposed as tarsi-serve ops."
@@ -37,6 +40,8 @@ projects:
     website: https://9aia.com/tarsi/
     repo: https://github.com/9aia/tarsi
     docs: https://9aia.com/tarsi/
+    depends_on: [scarab, lasius, hypha, pavo]
+    integrates_with: [tamias, cuora]
   - name: bupha
     tagline: "The gate: CI as tamias bundles"
     description: "CI integration: push sources queue per-sha pipeline runs on your box, shipped as tamias bundles."
@@ -48,6 +53,8 @@ projects:
     website: https://9aia.com/bupha/
     repo: https://github.com/9aia/bupha
     docs: https://9aia.com/bupha/
+    depends_on: [lasius, hypha, scarab, pavo]
+    integrates_with: [tamias, peregrin, cuora, sturn, tarsi]
   - name: myco
     tagline: "The ledger: durable work memory"
     description: "Records engine: a myco CLI owns every write to a repo's markdown work ledger."
@@ -59,6 +66,8 @@ projects:
     website: https://9aia.com/myco/
     repo: https://github.com/9aia/myco
     docs: https://9aia.com/myco/
+    depends_on: [scarab, lasius, pavo]
+    integrates_with: [tamias, tarsi, sepia]
   - name: kuda
     tagline: "Repo memory: verified code maps"
     description: "Code-map engine: crawls repos into verified per-module cards agents query instead of re-exploring."
@@ -70,6 +79,8 @@ projects:
     website: https://9aia.com/kuda/
     repo: https://github.com/9aia/kuda
     docs: https://9aia.com/kuda/
+    depends_on: [scarab, lasius, pavo]
+    integrates_with: [tamias, tarsi, myco, sturn]
   - name: mimus
     tagline: "The critic: claims verified against code"
     description: "Verification engine: extracts claims from docs and cards, verifies them against the code, repairs the fixable."
@@ -81,6 +92,8 @@ projects:
     website: https://9aia.com/mimus/
     repo: https://github.com/9aia/mimus
     docs: https://9aia.com/mimus/
+    depends_on: [scarab, pavo]
+    integrates_with: [tamias, tarsi, kuda, cuora]
   - name: cuora
     tagline: "Secrets broker: sealed, not spilled"
     description: "Secrets broker: code carries cuora:// references; values materialize as env vars at run time, audited."
@@ -92,6 +105,8 @@ projects:
     website: https://9aia.com/cuora/
     repo: https://github.com/9aia/cuora
     docs: https://9aia.com/cuora/
+    depends_on: [scarab, tamias, pavo]
+    integrates_with: [tarsi, peregrin]
   - name: sturn
     tagline: "The WAL: coordination in milliseconds"
     description: "Ephemeral coordination: claims, ops, and topics over the git object store."
@@ -103,6 +118,8 @@ projects:
     website: https://9aia.com/sturn/
     repo: https://github.com/9aia/sturn
     docs: https://9aia.com/sturn/
+    depends_on: [lasius, scarab, pavo]
+    integrates_with: [tamias, tarsi]
   - name: hypha
     tagline: "Distributed substrate: entities across machines"
     description: "Distributed substrate: a generic entity plane with namespaced ops, snapshots, and locks."
@@ -114,6 +131,7 @@ projects:
     website: https://9aia.com/hypha/
     repo: https://github.com/9aia/hypha
     docs: https://9aia.com/hypha/
+    integrates_with: [tamias, cuora, tarsi]
   - name: cicada
     tagline: "Calendars as code: scheduled work"
     description: "Scheduled-work engine: declare calendars in YAML, plan and apply them against live providers."
@@ -125,6 +143,8 @@ projects:
     website: https://9aia.com/cicada/
     repo: https://github.com/9aia/cicada
     docs: https://9aia.com/cicada/
+    depends_on: [pavo]
+    integrates_with: [tamias, tarsi]
   - name: lasius
     tagline: "Git & workspace expertise"
     description: "Git and workspace expertise: lasius.toml clones and syncs every repo of a GitHub org."
@@ -136,6 +156,8 @@ projects:
     website: https://9aia.com/lasius/
     repo: https://github.com/9aia/lasius
     docs: https://9aia.com/lasius/
+    depends_on: [pavo]
+    integrates_with: [tamias, tarsi]
   - name: sepia
     tagline: "Session lifecycle: agents, agnostically"
     description: "Session lifecycle engine: one canonical IR and pluggable store drivers across coding agents."
@@ -147,6 +169,8 @@ projects:
     website: https://9aia.com/sepia/
     repo: https://github.com/9aia/sepia
     docs: https://9aia.com/sepia/
+    depends_on: [hypha, pavo]
+    integrates_with: [tamias, tarsi, peregrin]
   - name: peregrin
     tagline: "Campaigns: event-driven orchestration"
     description: "Orchestration engine: declarative campaigns of events, nodes, and drivers across your machines."
@@ -158,6 +182,8 @@ projects:
     website: https://9aia.com/peregrin/
     repo: https://github.com/9aia/peregrin
     docs: https://9aia.com/peregrin/
+    depends_on: [tamias, sepia, hypha, bupha, scarab, pavo]
+    integrates_with: [cuora, sturn, tarsi, myco]
   - name: pavo
     tagline: "The screen: renders every view"
     description: "Visualization host: renders ViewNode IR trees emitted by tamias drivers across CLI, TUI, and web."
@@ -169,6 +195,7 @@ projects:
     website: https://9aia.com/pavo/
     repo: https://github.com/9aia/pavo
     docs: https://9aia.com/pavo/
+    integrates_with: [tamias, cuora, tarsi, bupha, myco, kuda, sturn, mimus, cicada, lasius, sepia, peregrin]
   - name: delphis
     tagline: "Remote dev environments over Tailscale"
     description: "Remote development environments over Tailscale with VS Code Remote SSH. Archived."
