@@ -68,6 +68,10 @@ drives 9aia.com and is mirrored into each repo's docs index).
   regenerate drifted cards in the same change.
 - English everywhere (code, comments, commit messages).
 - Never edit `node_modules`, `target/`, or generated files.
+- Org LoC reporting: every non-archived repo must appear in
+  `repos/.github/packs/loc/loc.yaml` — `lasius doctor` enforces it
+  (`loc coverage` check). New repos: add to the pack, bump nothing
+  else; the weekly `loc` workflow picks it up.
 
 ## Docs contract
 
