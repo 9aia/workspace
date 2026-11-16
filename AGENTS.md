@@ -33,11 +33,18 @@ inside.
 | `repos/castor` | SQL database CLI (private) |
 | `repos/mycena` | code scout → myco ledger (private) |
 | `repos/lasius` | git & workspace expertise — workspace gardener CLI + shared `lasius-vcs` port (P-019) |
-| `repos/cypera` | docs utilities — reusable reference-doc generation for the org (private) |
+| `repos/cypera` | docs utilities — reusable reference-doc generation for the org |
 | `repos/vitepress-theme-9aia` | VitePress theme |
 | `repos/slidev-theme-9aia` | Slidev theme |
 | `repos/9aia.github.io` | Gaia's website |
 | `repos/.github` | org profile + community health |
+| `repos/ci-e2e` | bupha CI e2e validation scratch repo (private) |
+| `repos/strigi` | natural-language CLI assistant — **archived** |
+| `repos/delphis` | remote dev environments over Tailscale — **archived** |
+
+This workspace root is itself the `9aia/workspace` repo. `strigi` and
+`delphis` are archived on GitHub (read-only) — cloned for reference,
+do not push to them.
 
 Org-level shared content lives at the workspace root: `workflows/`
 (peregrin campaign bundles), `libraries/` (tamias packs — e.g.
