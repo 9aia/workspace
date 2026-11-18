@@ -1,46 +1,24 @@
 # kill-mutants — StrykerJS mutation testing → sepia agent triage →
-# tests/disable-comments → push → PR. Operator-triggered: an external
-# `mutate.requested` event (POST /api/events/inject on the campaign
-# listener) carries {id, package, checkout, base_branch}; there is no
-# webhook ingress and no polling.
+# tests/disable-comments → push → PR. Operator-triggered: an injected
+# `mutate.requested` event (POST /api/events/inject) carries
+# {id, package, checkout, base_branch}; no webhook ingress.
 #
 # Flow (one request = one `.<id>` suffix riding every event type):
-#   mutate.requested ──route──► requested.<id> ──► worktree
-#   (lasius fetch + DETACHED worktree at origin/<base_branch> —
-#   pr-heal style, so re-runs never collide on a stale local
-#   test/<id> branch; stryker.conf.json must exist there) ──►
-#   install (config.install_cmd at worktree root — bun
-#   --frozen-lockfile by default) ──► mutate (config.mutate_cmd inside
-#   <pkg>, generous timeout, report must land at
-#   <pkg>/<mutate_report>) ──► summarize (jq mutation.json → per-status
-#   counts + actionable-mutant detail file; zero actionable →
-#   summarize.clean.<id>, terminal) ──► agent (sepia
-#   POST /api/sessions/run — kill survivors with tests; Stryker
-#   disable comments ONLY for empirically-proven equivalent/unreachable
-#   mutants) ──► commit + push HEAD:refs/heads/test/<id> (lasius) ──►
-#   forge pr create (lasius, --base <base_branch>) ──► cleanup
-#   worktree ──► report
+#   mutate.requested ──route──► requested.<id> ──► worktree (lasius
+#   fetch + detached worktree at origin/<base_branch>; re-checks
+#   stryker.conf.json there — the authoritative gate) ──► install
+#   (config.install_cmd) ──► mutate (config.mutate_cmd in <pkg>,
+#   report must land at <pkg>/<mutate_report>) ──► summarize (jq →
+#   counts + detail file; zero actionable → summarize.clean) ──►
+#   agent (sepia /api/sessions/run — kill survivors with tests;
+#   disable only proven-equivalent) ──► lasius commit + push
+#   HEAD:refs/heads/test/<id> ──► lasius forge pr create ──►
+#   cleanup ──► report
 #
-# Boundaries: lasius owns every git/forge call (worktree, commit,
-# push, PR create), sepia owns the agent session (via the node's POST
-# /api/sessions/run), peregrin owns only event routing, tamias
-# distributes. No raw git/gh/devin anywhere in this file.
-#
-# Stateless like pr-heal/new-feat: the Rust engine has no
-# stdout→state channel, so the request payload is persisted once by
-# the route node to <worktree_base>/requests/<id>.env and every
-# downstream node re-sources it (same pattern as pr-heal's per-PR
-# attempt ledger / conflict PR-number files). The `.<id>` suffix on
-# event types is the correlation key (`${event.match.1}`).
-#
-# Operator invocation (see README.md):
-#   curl -X POST http://127.0.0.1:29173/api/events/inject \
-#     -H "authorization: Bearer $PEREGRIN_TOKEN" \
-#     -H 'content-type: application/json' \
-#     -d '{"type":"mutate.requested","payload":{"id":"crypto-mutation",
-#          "package":"packages/crypto",
-#          "checkout":"/path/to/clone",
-#          "base_branch":"main"},"idempotencyKey":"crypto-mutation-1"}'
+# Boundaries: lasius owns git/forge, sepia owns the agent session,
+# peregrin owns routing. No raw git/gh/devin. Stateless like pr-heal:
+# route persists requests/<id>.env (no stdout→state channel); every
+# node re-sources it.
 name: kill-mutants
 
 annotations:
@@ -58,81 +36,54 @@ annotations:
 # values (id/package/checkout/base_branch) arrive on the
 # mutate.requested payload; these are deployment defaults.
 config:
-  # Fallback local clone path when the event payload omits
-  # `checkout`. lasius accepts a repos_dir clone name or a checkout
-  # path — a real path is required here because the route node stats
-  # <checkout>/<package>/stryker.conf.json before accepting.
+  # Fallback clone path when the payload omits `checkout` (absolute path).
   checkout: ""
-  # lasius workspace root (--root) — repo args are checkout paths,
-  # so any lasius.toml workspace works; the org workspace is the
-  # natural choice.
+  # lasius workspace root (--root) for all vcs/forge calls.
   lasius_root: "/home/luis/GitHub/9aia/workspace"
-  # Worktrees land at <worktree_base>/wt-<id>; per-run request env
-  # files, mutant summaries and report copies land under
-  # <worktree_base>/{requests,reports}.
+  # wt-<id> worktrees; requests/, reports/ artifacts live alongside.
   worktree_base: "$HOME/.local/share/kill-mutants/worktrees"
-  # Base URL of `peregrin serve` — sessions plane. Agent nodes POST
-  # /api/sessions/run here; bearer = PEREGRIN_TOKEN.
+  # `peregrin serve` sessions plane; bearer = PEREGRIN_TOKEN.
   node_url: "http://127.0.0.1:18787"
-  # Dependency install run at the worktree ROOT before mutate.
-  # ktbhealth/product is a bun monorepo — frozen lockfile keeps the
-  # worktree reproducible. Override per repo (npm/pnpm/cargo …).
+  # Dependency install at the worktree root (override per repo).
   install_cmd: "bun install --frozen-lockfile"
-  # Mutation command run with cwd=<worktree>/<package>. MUST exit 0
-  # on a completed run — StrykerJS does unless the repo sets a
-  # thresholds.break value in stryker.conf.json (do not). The node
-  # also requires <mutate_report> to exist and parse as JSON.
+  # Mutation command, cwd=<worktree>/<package>. MUST exit 0 on a
+  # completed run — no thresholds.break in stryker.conf.json.
   mutate_cmd: "bun run mutate"
   # Stryker jsonReporter output, relative to the package dir.
   mutate_report: "reports/mutation/mutation.json"
-  # Mutant statuses handed to the agent. Survived = real gap; Timeout
-  # = test too slow / mutant hangs; NoCoverage = mutant in code no
-  # test reaches. Ignored/CompileError/RuntimeError are excluded —
-  # the first is deliberate, the latter two are harness problems a
-  # test-writing pass cannot fix.
+  # Mutant statuses handed to the agent (Ignored/CompileError/
+  # RuntimeError excluded — deliberate or harness problems).
   actionable_statuses: '["Survived","Timeout","NoCoverage"]'
-  # Cap on actionable-mutant lines written into the agent prompt
-  # summary (the full detail file is kept under worktree_base).
+  # Cap on actionable-mutant lines in the agent prompt.
   summary_max_lines: 300
-  # Branch prefix — the pushed head branch is <branch_prefix>/<id>.
-  # Convention: pick id like "<pkg>-mutation" → test/<pkg>-mutation.
+  # Head-branch prefix: pushed branch is <branch_prefix>/<id>.
   branch_prefix: "test"
-  # Fallback PR base branch when the payload omits `base_branch`.
+  # Fallback PR base when the payload omits `base_branch`.
   default_branch: "main"
-  # sepia agent-config id for the triage session (e.g. devin).
+  # sepia agent-config id for the triage session.
   agent: "devin"
-  # ACP session mode applied via session/set_mode — REQUIRED for
-  # unattended runs: devin's default accept-edits prompts on exec
-  # and nothing answers, deadlocking the turn. "bypass"
-  # auto-approves everything (fine inside a disposable worktree);
-  # "smart" is the safer middle ground.
+  # ACP mode — REQUIRED unattended (devin's default prompts on exec
+  # and deadlocks). bypass = auto-approve all; smart = middle ground.
   agent_mode: "bypass"
-  # Agent session timeout (ms) — mutant triage across a whole package
-  # is long; the curl --max-time is derived from it (+100s).
+  # Agent session timeout (ms); curl --max-time derives from it.
   agent_timeout_ms: 1800000
 
 capabilities:
   secrets:
     - PEREGRIN_TOKEN
 
-# Declared event contracts. `mutate.requested` is EXTERNAL — no node
-# emits it; an operator (or ops tooling) POSTs it to the campaign
-# host's `/api/events/inject` (campaign serve's shared listener) and
-# it lands on the trigger channel like a bupha ci.job.completed
-# delivery. Declared here so `campaign validate` wires
-# kill-mutants.route's subscription and the payload shape is
-# documented. Payload (all strings; checkout/base_branch optional —
-# config.checkout/config.default_branch are the fallbacks):
-#   id           REQUIRED — run id, [A-Za-z0-9][A-Za-z0-9._-]{0,63};
-#                becomes <worktree_base>/wt-<id>, requests/<id>.env
-#                and branch <branch_prefix>/<id>. Unique per run.
-#   package      REQUIRED — package dir relative to the checkout
-#                root containing stryker.conf.json (e.g.
-#                "packages/crypto").
+# EXTERNAL event — operator POSTs it to /api/events/inject on the
+# shared campaign listener. Declared so validate wires route's
+# subscription. Payload (strings; checkout/base_branch optional —
+# config fallbacks apply):
+#   id           REQUIRED — [A-Za-z0-9][A-Za-z0-9._-]{0,63}; keys
+#                wt-<id>, requests/<id>.env and branch test/<id>.
+#                Unique per run (nothing dedups on it).
+#   package      REQUIRED — dir relative to checkout root containing
+#                stryker.conf.json (e.g. "packages/crypto").
 #   checkout     local clone path lasius operates on.
-#   base_branch  PR base / worktree rev (default config.default_branch).
-# `idempotencyKey` on the inject body dedups transport retries; `id`
-# must still be unique per logical run — nothing dedups on it.
+#   base_branch  PR base / worktree rev.
+# idempotencyKey on the inject body dedups transport retries.
 events:
 - type: mutate.requested
   fields:
@@ -141,24 +92,12 @@ events:
     checkout: string
     base_branch: string
 
-# No supersede: requests are independent operator actions keyed by
-# their own id; a re-run with the same id reuses the deterministic
-# worktree path (stale worktree removed, branch re-created — see
-# README safety notes).
+# No supersede — requests are independent operator actions keyed by id.
 
 nodes:
-# --- route: validate + persist the request -----------------------------
-# The ONLY node that sees the raw payload. Validates the contract
-# (id charset — it rides every downstream event type as
-# `${event.match.1}`, package is a safe relative path), then writes
-# <worktree_base>/requests/<id>.env — the single source every later
-# node re-sources (no stdout→state channel in the Rust engine).
-# stryker.conf.json is NOT checked here: the checkout's current
-# branch may be stale — the worktree node re-checks it against the
-# fresh origin/<base_branch> worktree, which is the authoritative
-# gate. Emits requested.<id> on success; request.invalid
-# (bad/missing fields) and request.failed (infra) are terminal
-# reports. Exit 2 = invalid payload, anything else = failed.
+# route: validate payload, persist requests/<id>.env. stryker.conf.json
+# is NOT checked here (checkout's current branch may be stale) — the
+# worktree node re-checks it on the fresh origin/<base> worktree.
 - id: kill-mutants.route
   driver: shell
   on:
@@ -208,16 +147,10 @@ nodes:
       default: kill-mutants.request.failed
     timeout: 60
 
-# --- worktree: lasius fetch + DETACHED worktree at origin/<base> ------
-# Same mechanics as pr-heal.worktree: fetch, remove any stale
-# worktree at the deterministic path, create a DETACHED worktree at
-# origin/<base_branch> (no --branch — a leftover local test/<id>
-# branch from a prior run would collide; the push node targets
-# HEAD:refs/heads/<branch> instead, same as pr-heal). Re-running an
-# id reuses the path — uncommitted work there is lost (README safety
-# notes). The stryker.conf.json check runs against the FRESH
-# worktree — the authoritative gate (the route node can't check the
-# checkout's possibly-stale current branch).
+# worktree: detached at origin/<base_branch> (pr-heal style — a stale
+# local test/<id> branch would collide with --branch; push targets
+# HEAD:refs/heads/<branch> instead). stryker.conf.json is checked
+# here against the fresh worktree — the authoritative gate.
 - id: kill-mutants.worktree
   driver: shell
   on:
@@ -243,10 +176,7 @@ nodes:
       default: "kill-mutants.worktree.failed.${event.match.1}"
     timeout: 120
 
-# --- install: dependency install at the worktree root ------------------
-# Fresh worktrees have no node_modules — the package manager install
-# must run before stryker. Config-driven (bun --frozen-lockfile for
-# ktbhealth/product; override for npm/pnpm/cargo repos).
+# install: fresh worktrees have no node_modules — install before stryker.
 - id: kill-mutants.install
   driver: shell
   on:
@@ -268,14 +198,8 @@ nodes:
       default: "kill-mutants.install.failed.${event.match.1}"
     timeout: 900
 
-# --- mutate: run the package's mutation suite ---------------------------
-# cwd = <worktree>/<package>; output teed to
-# <worktree_base>/reports/<id>-mutate.log for postmortems. Success
-# requires BOTH rc 0 (a completed stryker run — thresholds.break must
-# stay unset in the repo's stryker.conf.json) AND a parseable JSON
-# report at <package>/<mutate_report>. Stryker exits non-zero only on
-# harness errors, so a non-zero rc is a real failure, not "survivors
-# found".
+# mutate: cwd=<worktree>/<package>; log teed to reports/<id>-mutate.log.
+# Requires rc 0 (no thresholds.break) AND a parseable JSON report.
 - id: kill-mutants.mutate
   driver: shell
   on:
@@ -312,13 +236,9 @@ nodes:
       default: "kill-mutants.mutate.failed.${event.match.1}"
     timeout: 3900
 
-# --- summarize: mutation.json → counts + agent-facing detail -----------
-# Copies the report to <worktree_base>/reports/<id>-mutation.json
-# (survives worktree cleanup) and writes <id>-mutants.txt: per-status
-# counts plus one line per actionable mutant
-# (file:line [mutator] status — reason → replacement), capped at
-# config.summary_max_lines. Zero actionable mutants → exit 3 →
-# summarize.clean.<id> (terminal success, no agent session needed).
+# summarize: copies the report out of the worktree and writes
+# <id>-mutants.txt (counts + one line per actionable mutant). Zero
+# actionable → exit 3 → summarize.clean.<id> (terminal, no agent).
 - id: kill-mutants.summarize
   driver: shell
   on:
@@ -374,13 +294,10 @@ nodes:
       default: "kill-mutants.summarize.failed.${event.match.1}"
     timeout: 120
 
-# --- agent: sepia session — kill survivors, prove equivalence ----------
-# Same POST /api/sessions/run mechanics as pr-heal.agent: shell+curl so
-# the bearer rides curl --config stdin (never `ps` argv), `mode` is
-# REQUIRED for unattended turns, per-id agent lock stops parallel
-# sessions on one worktree (released by trap on every exit path).
-# The prompt carries the package, the survivor detail file, the
-# strict equivalence rule, and the repo-convention guardrails.
+# agent: sepia session (same /api/sessions/run mechanics as
+# pr-heal.agent — bearer via curl --config stdin, mode REQUIRED for
+# unattended turns, per-id lock). Prompt carries the survivor detail
+# file + the strict equivalence rule.
 - id: kill-mutants.agent
   driver: shell
   on:
@@ -450,10 +367,8 @@ nodes:
       default: "kill-mutants.agent.failed.${event.match.1}"
     timeout: 3960
 
-# --- push: lasius commit + push HEAD to the PR head branch --------------
-# No --allow-empty: an agent that produced no diff (e.g. judged every
-# survivor equivalent but added no disables/tests) fails the commit
-# honestly instead of opening an empty PR.
+# push: no --allow-empty — an agent that produced no diff fails the
+# commit honestly instead of opening an empty PR.
 - id: kill-mutants.push
   driver: shell
   on:
@@ -479,11 +394,7 @@ nodes:
       default: "kill-mutants.push.failed.${event.match.1}"
     timeout: 120
 
-# --- pr: lasius forge pr create ------------------------------------------
-# The pushed branch is not the deliverable here — the PR is (unlike
-# refactor). pr create re-derives nothing: branch/base come from the
-# request env file; the body summarizes what the agent was asked to
-# do and points at the kept mutant detail file.
+# pr: the pushed branch is not the deliverable — the PR is.
 - id: kill-mutants.pr
   driver: shell
   on:
@@ -512,12 +423,9 @@ nodes:
       default: "kill-mutants.pr.failed.${event.match.1}"
     timeout: 120
 
-# --- cleanup: worktree after PR created or clean run ---------------------
-# The deliverable is on the remote — the worktree has done its job.
-# Request env files, mutant summaries and report copies live OUTSIDE
-# the worktree under <worktree_base>/{requests,reports} and are kept
-# for audit. Failure paths keep the worktree for debugging (README
-# ops).
+# cleanup: deliverable is on the remote. Artifacts live OUTSIDE the
+# worktree under <worktree_base>/{requests,reports}; failures keep
+# the worktree for debugging.
 - id: kill-mutants.cleanup
   driver: shell
   on:
