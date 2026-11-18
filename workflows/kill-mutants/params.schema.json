@@ -5,7 +5,7 @@
   "properties": {
     "checkout": {
       "type": "string",
-      "description": "Fallback local clone path lasius operates on when the mutate.requested payload omits `checkout`. The route node stats <checkout>/<package>/stryker.conf.json, so a real path is required. REQUIRED per deployment or per request.",
+      "description": "Fallback local clone path lasius operates on when the mutate.requested payload omits `checkout`. lasius vcs fetch/worktree run against it under lasius_root — pass an absolute path. REQUIRED per deployment or per request.",
       "default": ""
     },
     "lasius_root": {

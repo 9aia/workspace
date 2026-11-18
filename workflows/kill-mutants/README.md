@@ -71,15 +71,15 @@ the running campaign's trigger channel; watch progress with
 
 ```
 mutate.requested ──route──► requested.<id>
-   │  validate payload + stat <checkout>/<pkg>/stryker.conf.json,
+   │  validate payload shape,
    │  persist <worktree_base>/requests/<id>.env
    ▼
 worktree ──► install ──► mutate ──► summarize ──► agent ──► push ──► pr ──► cleanup ──► report
  (lasius    (config.   (config.    (jq counts +   (sepia   (lasius  (lasius  (lasius   (terminal
   fetch +    install_   mutate_     detail file;   session,  commit  forge    worktree   echo)
-  worktree   cmd @ wt   cmd @ pkg,  zero          tests +   + push  pr       remove)
-  add        root)      tee log,    actionable →   proven     HEAD:…) create)
-  test/<id>)            report      clean.<id>)   disables)
+  detached   cmd @ wt   cmd @ pkg,  zero          tests +   + push  pr       remove)
+  worktree   root)      tee log,    actionable →   proven     HEAD:…) create)
+  @ base)               report      clean.<id>)   disables)
                                      must parse)
 ```
 
@@ -170,15 +170,22 @@ mutant: `file:line [mutator] status — reason → replacement`). Rules:
   (`<worktree_base>/wt-<id>.agent-lock`, released on every exit).
 - **Unique-id contract** — `id` keys the worktree path, request file,
   branch and artifacts. Re-using an id removes the stale worktree and
-  re-creates the branch (losing uncommitted work there). The route
+  pushes to the same `test/<id>` branch name (a diverged re-run fails
+  the push honestly rather than force-overwriting). The route
   node restricts `id` to `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` and rejects
   payload values containing quotes/newlines before they are
   single-quoted into the request env file.
-- **Payload validation at the door** — missing fields, unsafe
-  `package` paths (`..`, absolute, odd charset) or a missing
-  `stryker.conf.json` emit `request.invalid` before any worktree or
-  install happens (checked against both the checkout and the fresh
-  worktree).
+- **Payload validation up front, config gate at the worktree** —
+  missing fields or unsafe `package` paths (`..`, absolute, odd
+  charset) emit `request.invalid` before any work. The
+  `stryker.conf.json` requirement is checked against the FRESH
+  `origin/<base_branch>` worktree (the route can't trust the
+  checkout's current branch — it may be stale or on another ref), so
+  a package without mutation config fails at `worktree.failed.<id>`.
+- **Detached worktrees** — like pr-heal, the worktree is created
+  detached at `origin/<base_branch>` and the push targets
+  `HEAD:refs/heads/test/<id>`; re-runs can never collide on a stale
+  local branch.
 - **Report integrity** — `mutate` requires exit 0 AND a parseable
   JSON report; `summarize` copies the report out of the worktree
   before cleanup so artifacts survive.
@@ -216,10 +223,9 @@ mutant: `file:line [mutator] status — reason → replacement`). Rules:
   verify-loop stage is a natural v2.
 - **Single-package scope** — one `package` per request; monorepo-wide
   mutation runs are N requests (or a future fan-out node).
-- **`checkout` must be a lasius-visible path** — the route node stats
-  `<checkout>/<package>/stryker.conf.json` directly, so a bare clone
-  *name* under `repos_dir` only works if it also resolves as a path;
-  pass absolute paths.
+- **`checkout` must be a lasius-visible path** — pass absolute clone
+  paths; the worktree node runs `lasius vcs fetch/worktree` against
+  it under `lasius_root`.
 - **Prompt-size ceiling** — `summary_max_lines` (default 300) caps
   the survivor list in the agent prompt; packages with thousands of
   survivors get a truncated view (full detail stays in the artifact

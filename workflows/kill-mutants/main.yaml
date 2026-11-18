@@ -6,8 +6,9 @@
 #
 # Flow (one request = one `.<id>` suffix riding every event type):
 #   mutate.requested ──route──► requested.<id> ──► worktree
-#   (lasius fetch + worktree add --branch test/<id> at
-#   origin/<base_branch>; stryker.conf.json must exist) ──►
+#   (lasius fetch + DETACHED worktree at origin/<base_branch> —
+#   pr-heal style, so re-runs never collide on a stale local
+#   test/<id> branch; stryker.conf.json must exist there) ──►
 #   install (config.install_cmd at worktree root — bun
 #   --frozen-lockfile by default) ──► mutate (config.mutate_cmd inside
 #   <pkg>, generous timeout, report must land at
@@ -149,13 +150,15 @@ nodes:
 # --- route: validate + persist the request -----------------------------
 # The ONLY node that sees the raw payload. Validates the contract
 # (id charset — it rides every downstream event type as
-# `${event.match.1}`, package is a safe relative path, checkout has
-# the stryker.conf.json the flow requires), then writes
+# `${event.match.1}`, package is a safe relative path), then writes
 # <worktree_base>/requests/<id>.env — the single source every later
 # node re-sources (no stdout→state channel in the Rust engine).
-# Emits requested.<id> on success; request.invalid (bad/missing
-# fields, no stryker.conf.json) and request.failed (infra) are
-# terminal reports. Exit 2 = invalid payload, anything else = failed.
+# stryker.conf.json is NOT checked here: the checkout's current
+# branch may be stale — the worktree node re-checks it against the
+# fresh origin/<base_branch> worktree, which is the authoritative
+# gate. Emits requested.<id> on success; request.invalid
+# (bad/missing fields) and request.failed (infra) are terminal
+# reports. Exit 2 = invalid payload, anything else = failed.
 - id: kill-mutants.route
   driver: shell
   on:
@@ -185,7 +188,6 @@ nodes:
       [[ "$PACKAGE" =~ ^[A-Za-z0-9._/@-]+(/[A-Za-z0-9._/@-]+)*$ ]] || fail "package '$PACKAGE' must be a relative path of [A-Za-z0-9._/@-] segments"
       case "$PACKAGE" in *..*) fail "package must not contain '..'" ;; esac
       [ -n "$CHECKOUT" ] || fail "missing checkout (payload.checkout or config.checkout)"
-      [ -f "$CHECKOUT/$PACKAGE/stryker.conf.json" ] || fail "no stryker.conf.json at $CHECKOUT/$PACKAGE"
       # Values are single-quoted into the env file — reject quotes
       # and newlines up front rather than escaping.
       for v in "$ID" "$PACKAGE" "$CHECKOUT" "$BASE"; do
@@ -206,13 +208,16 @@ nodes:
       default: kill-mutants.request.failed
     timeout: 60
 
-# --- worktree: lasius fetch + worktree add on test/<id> -----------------
-# Same mechanics as new-feat.worktree/refactor.worktree: fetch, remove
-# any stale worktree at the deterministic path, create the branch at
-# origin/<base_branch>. Re-running an id reuses the path — uncommitted
-# work there is lost (README safety notes). The stryker.conf.json
-# check repeats against the fresh worktree (the route checked the
-# possibly-stale checkout).
+# --- worktree: lasius fetch + DETACHED worktree at origin/<base> ------
+# Same mechanics as pr-heal.worktree: fetch, remove any stale
+# worktree at the deterministic path, create a DETACHED worktree at
+# origin/<base_branch> (no --branch — a leftover local test/<id>
+# branch from a prior run would collide; the push node targets
+# HEAD:refs/heads/<branch> instead, same as pr-heal). Re-running an
+# id reuses the path — uncommitted work there is lost (README safety
+# notes). The stryker.conf.json check runs against the FRESH
+# worktree — the authoritative gate (the route node can't check the
+# checkout's possibly-stale current branch).
 - id: kill-mutants.worktree
   driver: shell
   on:
@@ -230,9 +235,9 @@ nodes:
       mkdir -p "${config.worktree_base}"
       lasius --root "${config.lasius_root}" vcs fetch "$KM_CHECKOUT" --json >/dev/null
       lasius --root "${config.lasius_root}" vcs worktree remove "$KM_CHECKOUT" --dir "$WT" --json >/dev/null 2>&1 || true
-      lasius --root "${config.lasius_root}" vcs worktree add "$KM_CHECKOUT" --dir "$WT" --branch "$KM_BRANCH" --rev "origin/${KM_BASE_BRANCH}" --json >/dev/null
-      [ -f "$WT/$KM_PACKAGE/stryker.conf.json" ] || { echo "worktree lacks $KM_PACKAGE/stryker.conf.json"; exit 1; }
-      echo "worktree ready: $WT (branch $KM_BRANCH, base origin/$KM_BASE_BRANCH)"
+      lasius --root "${config.lasius_root}" vcs worktree add "$KM_CHECKOUT" --dir "$WT" --rev "origin/${KM_BASE_BRANCH}" --json >/dev/null
+      [ -f "$WT/$KM_PACKAGE/stryker.conf.json" ] || { echo "worktree lacks $KM_PACKAGE/stryker.conf.json at origin/${KM_BASE_BRANCH}"; exit 1; }
+      echo "worktree ready: $WT (detached at origin/${KM_BASE_BRANCH}, push → $KM_BRANCH)"
     emit:
       '0': "kill-mutants.worktree.ready.${event.match.1}"
       default: "kill-mutants.worktree.failed.${event.match.1}"
@@ -547,8 +552,6 @@ nodes:
   - kill-mutants.agent.failed.*
   - kill-mutants.push.failed.*
   - kill-mutants.pr.failed.*
-  - kill-mutants.pr.created.*
-  - kill-mutants.summarize.clean.*
   - kill-mutants.cleaned.*
   - node.exhausted
   emits:
