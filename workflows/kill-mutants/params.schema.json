@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "kill-mutants params",
+  "type": "object",
+  "properties": {
+    "checkout": {
+      "type": "string",
+      "description": "Fallback local clone path lasius operates on when the mutate.requested payload omits `checkout`. The route node stats <checkout>/<package>/stryker.conf.json, so a real path is required. REQUIRED per deployment or per request.",
+      "default": ""
+    },
+    "lasius_root": {
+      "type": "string",
+      "description": "lasius workspace root (--root flag); repo args are checkout paths so any lasius.toml workspace works.",
+      "default": "/home/luis/GitHub/9aia/workspace"
+    },
+    "worktree_base": {
+      "type": "string",
+      "description": "Worktrees land at <worktree_base>/wt-<id>; request env files, mutant summaries and report copies live under <worktree_base>/{requests,reports}.",
+      "default": "$HOME/.local/share/kill-mutants/worktrees"
+    },
+    "node_url": {
+      "type": "string",
+      "description": "Base URL of `peregrin serve` (sessions plane). The agent node POSTs /api/sessions/run here; bearer = PEREGRIN_TOKEN.",
+      "default": "http://127.0.0.1:18787"
+    },
+    "install_cmd": {
+      "type": "string",
+      "description": "Dependency install run at the worktree root before mutation. Default suits bun monorepos (ktbhealth/product); override per repo (npm/pnpm/cargo …).",
+      "default": "bun install --frozen-lockfile"
+    },
+    "mutate_cmd": {
+      "type": "string",
+      "description": "Mutation command run with cwd=<worktree>/<package>. MUST exit 0 on a completed run — do not set a thresholds.break value in the repo's stryker.conf.json. Default `bun run mutate` matches the per-package `\"mutate\": \"stryker run\"` script convention.",
+      "default": "bun run mutate"
+    },
+    "mutate_report": {
+      "type": "string",
+      "description": "Stryker jsonReporter output path, relative to the package dir. The node requires this file to exist and parse as JSON after mutate_cmd exits 0.",
+      "default": "reports/mutation/mutation.json"
+    },
+    "actionable_statuses": {
+      "type": "string",
+      "description": "JSON array of mutant statuses handed to the agent. Default Survived/Timeout/NoCoverage; Ignored is deliberate and CompileError/RuntimeError are harness problems.",
+      "default": "[\"Survived\",\"Timeout\",\"NoCoverage\"]"
+    },
+    "summary_max_lines": {
+      "type": "integer",
+      "description": "Cap on actionable-mutant lines written into the agent prompt summary; the full detail file is kept under <worktree_base>/reports regardless.",
+      "default": 300
+    },
+    "branch_prefix": {
+      "type": "string",
+      "description": "Head-branch prefix — the pushed branch is <branch_prefix>/<id>. Convention: id like \"<pkg>-mutation\" yields test/<pkg>-mutation.",
+      "default": "test"
+    },
+    "default_branch": {
+      "type": "string",
+      "description": "Fallback PR base / worktree rev when the payload omits `base_branch`.",
+      "default": "main"
+    },
+    "agent": {
+      "type": "string",
+      "description": "sepia agent-config id for the triage session.",
+      "default": "devin"
+    },
+    "agent_mode": {
+      "type": "string",
+      "description": "ACP session mode applied after create (session/set_mode). REQUIRED for unattended runs — devin's default accept-edits prompts on exec and deadlocks. 'bypass' auto-approves all tools; 'smart' is the safer middle ground.",
+      "default": "bypass"
+    },
+    "agent_timeout_ms": {
+      "type": "integer",
+      "description": "Agent session timeout in ms (default 30 min — whole-package mutant triage is long). curl --max-time derives from it (+100s); the node's own timeout ceiling is ~66 min, so keep values under ~3600000.",
+      "default": 1800000
+    }
+  },
+  "additionalProperties": true
+}
