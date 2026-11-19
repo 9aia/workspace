@@ -14,13 +14,13 @@ Two repo shapes, one campaign:
 
 - **Self-contained** — the `docs` orphan branch *is* the site
   checkout (`package.json` + `bun.lock` + `.vitepress/` at its
-  root), so the worktree root is the build root: `9aia/sepia`,
-  `9aia/peregrin`, `9aia/lasius`.
+  root), so the worktree root is the build root: `9aia/cypera`.
 - **Gen-dependent** — `docs:deploy` runs `docs:gen`/`docs:api`
   steps that `cd ..` into the main checkout for `cargo run` /
-  `cargo doc`: `9aia/myco`, `9aia/tamias`, `9aia/cuora`, `9aia/pavo`,
+  `cargo doc`: `9aia/sepia`, `9aia/peregrin`, `9aia/lasius`,
+  `9aia/myco`, `9aia/tamias`, `9aia/cuora`, `9aia/pavo`,
   `9aia/hypha`, `9aia/sturn`, `9aia/kuda`, `9aia/mimus`,
-  `9aia/tardigrada`.
+  `9aia/tardigrada`, `9aia/scarab`, `9aia/tarsi`, `9aia/cicada`.
   Their deploy nodes build the D6 dual checkout in shell: a
   `main_ref` worktree at `<run>` plus the docs-branch worktree at
   `<run>/docs`, with the deploy cmd's cwd the docs worktree —
@@ -57,7 +57,7 @@ switch the repo's Pages source from Actions-artifact to the
 ## Mechanics
 
 - **Ingress**: `docs.ingress.webhook` (`github-webhook`) watches the
-  thirteen repos; `secret_env` names follow the existing
+  seventeen repos; `secret_env` names follow the existing
   `BUPHA_WH_<OWNER>_<REPO>` convention (dots sanitized —
   `9aia.github.io` → `BUPHA_WH_9AIA_GITHUB_IO`) — *names only*, granted via
   `capabilities.secrets` (`BUPHA_TOKEN` + the fourteen `BUPHA_WH_*`
@@ -71,7 +71,7 @@ switch the repo's Pages source from Actions-artifact to the
   confirm `BUPHA_TOKEN`) — values may also resolve via the cuora
   chain (`cuora://peregrin/<NAME>`) when absent from the env file;
   TARDIGRADA's lives there. The webhook node resolves every listed
-  `secret_env` at startup, so all thirteen values must exist before
+  `secret_env` at startup, so all seventeen values must exist before
   deploying — a repo whose secret is missing fails the whole
   ingress, not just its own pushes.
 - **Routing**: `docs.route` re-emits every verified push as
