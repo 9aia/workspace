@@ -1,0 +1,319 @@
+#!/usr/bin/env python3
+"""devin-gc — garbage-collect stale Devin CLI sessions.
+
+Finds sessions in the Devin CLI sessions store whose working directory
+no longer exists or that live under known-ephemeral roots (agent
+workflow worktrees), and deletes them with `devin rm --force`.
+
+Default mode is a dry run: candidates are listed, nothing is deleted.
+Pass --apply to delete. Deletion goes through `devin rm`, which refuses
+sessions that are open in a live Devin instance, so active sessions
+cannot be removed even if a candidate check races.
+
+Examples:
+    devin-gc                          # preview orphaned sessions
+    devin-gc --apply                  # delete them
+    devin-gc --cwd /path/to/worktree --apply   # one workflow worktree
+    devin-gc --json                   # machine-readable preview
+    devin-gc --apply --vacuum         # delete, then shrink the db
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from fnmatch import fnmatch
+from pathlib import Path
+
+DEFAULT_DB = Path.home() / ".local/share/devin/cli/sessions.db"
+DATA_DIR = Path.home() / ".local/share/devin/cli"
+LOCK_DIR = DATA_DIR / "session_locks"
+TRANSCRIPT_DIR = DATA_DIR / "transcripts"
+SUMMARY_DIR = DATA_DIR / "summaries"
+
+# Working-directory globs that mark a session as disposable even when
+# the directory still exists (campaign worktrees outlive their purpose
+# the moment the run finishes).
+DEFAULT_EPHEMERAL_GLOBS = [
+    "*/pr-review/worktrees/*",
+    "*/kill-mutants/worktrees/*",
+]
+
+
+@dataclass
+class Candidate:
+    id: str
+    title: str
+    cwd: str
+    last_activity: int
+    reason: str  # dead-cwd | ephemeral | cwd-match
+
+
+def eprint(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+def connect_ro(db: Path) -> sqlite3.Connection:
+    uri = f"file:{db}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=30)
+    conn.execute("PRAGMA query_only = ON")
+    return conn
+
+
+def load_sessions(db: Path) -> list[tuple[str, str, str, int]]:
+    conn = connect_ro(db)
+    try:
+        rows = conn.execute(
+            "SELECT id, COALESCE(title, ''), working_directory, last_activity_at"
+            " FROM sessions"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [(r[0], r[1], r[2], int(r[3])) for r in rows]
+
+
+def session_ids(db: Path) -> set[str]:
+    conn = connect_ro(db)
+    try:
+        return {r[0] for r in conn.execute("SELECT id FROM sessions")}
+    finally:
+        conn.close()
+
+
+def classify(
+    sessions: list[tuple[str, str, str, int]],
+    cwd_filter: str | None,
+    ephemeral_globs: list[str],
+    min_age: float,
+    now: float,
+) -> list[Candidate]:
+    out: list[Candidate] = []
+    for sid, title, cwd, last_activity in sessions:
+        if now - last_activity < min_age:
+            continue
+        if cwd_filter is not None:
+            if cwd == cwd_filter:
+                out.append(Candidate(sid, title, cwd, last_activity, "cwd-match"))
+            continue
+        reason = None
+        if not os.path.isdir(cwd):
+            reason = "dead-cwd"
+        elif any(fnmatch(cwd, g) for g in ephemeral_globs):
+            reason = "ephemeral"
+        if reason:
+            out.append(Candidate(sid, title, cwd, last_activity, reason))
+    return out
+
+
+def fmt_time(ts: int) -> str:
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+
+
+def devin_rm(sid: str) -> tuple[bool, str]:
+    proc = subprocess.run(
+        ["devin", "rm", sid, "--force"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if proc.returncode == 0:
+        return True, ""
+    detail = (proc.stderr or proc.stdout).strip()
+    return False, detail or f"exit {proc.returncode}"
+
+
+def prune_locks(known_ids: set[str], min_age: float, now: float, apply: bool) -> list[str]:
+    """Remove session_locks/*.lock files whose session is gone from the db."""
+    removed: list[str] = []
+    if not LOCK_DIR.is_dir():
+        return removed
+    for lock in sorted(LOCK_DIR.glob("*.lock")):
+        sid = lock.stem
+        if sid in known_ids:
+            continue
+        if now - lock.stat().st_mtime < min_age:
+            continue
+        removed.append(lock.name)
+        if apply:
+            try:
+                lock.unlink()
+            except OSError as exc:
+                eprint(f"warning: could not remove {lock}: {exc}")
+    return removed
+
+
+def prune_orphan_files(known_ids: set[str], apply: bool) -> dict[str, list[str]]:
+    """Remove transcripts/summaries files whose session id is gone."""
+    result: dict[str, list[str]] = {}
+    for name, directory in (("transcripts", TRANSCRIPT_DIR), ("summaries", SUMMARY_DIR)):
+        removed: list[str] = []
+        if directory.is_dir():
+            for path in sorted(directory.iterdir()):
+                sid = path.stem
+                if sid in known_ids:
+                    continue
+                removed.append(path.name)
+                if apply:
+                    try:
+                        path.unlink()
+                    except OSError as exc:
+                        eprint(f"warning: could not remove {path}: {exc}")
+        result[name] = removed
+    return result
+
+
+def wal_checkpoint(db: Path) -> None:
+    try:
+        conn = sqlite3.connect(str(db), timeout=30)
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.commit()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        eprint(f"warning: wal_checkpoint failed: {exc}")
+
+
+def vacuum(db: Path) -> bool:
+    free = shutil.disk_usage(db.parent).free
+    size = db.stat().st_size
+    if free < size:
+        eprint(
+            f"warning: skipping VACUUM — {free / 1e9:.1f}G free, "
+            f"db is {size / 1e9:.1f}G (needs roughly equal headroom)"
+        )
+        return False
+    eprint("vacuuming sessions.db (this can take a while on large stores)...")
+    conn = sqlite3.connect(str(db), timeout=300)
+    try:
+        conn.execute("VACUUM")
+    finally:
+        conn.close()
+    return True
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="Garbage-collect stale Devin CLI sessions.",
+        epilog="Dry-run by default; pass --apply to delete.",
+    )
+    ap.add_argument("--db", type=Path, default=DEFAULT_DB, help="sessions.db path")
+    ap.add_argument(
+        "--cwd",
+        help="only collect sessions whose working_directory equals this path",
+    )
+    ap.add_argument(
+        "--min-age",
+        type=float,
+        default=0,
+        metavar="SECONDS",
+        help="skip sessions active within this many seconds (default: 0)",
+    )
+    ap.add_argument(
+        "--ephemeral-glob",
+        action="append",
+        dest="ephemeral_globs",
+        help="extra working-directory glob marking disposable sessions "
+        f"(default: {', '.join(DEFAULT_EPHEMERAL_GLOBS)}); repeatable",
+    )
+    ap.add_argument("--apply", action="store_true", help="actually delete")
+    ap.add_argument("--vacuum", action="store_true", help="VACUUM the db after deleting")
+    ap.add_argument("--json", action="store_true", help="machine-readable output")
+    ap.add_argument(
+        "--keep-locks",
+        action="store_true",
+        help="do not prune orphaned session_locks/transcripts/summaries files",
+    )
+    args = ap.parse_args()
+
+    db = args.db.expanduser()
+    if not db.is_file():
+        eprint(f"error: sessions db not found: {db}")
+        return 2
+
+    ephemeral = DEFAULT_EPHEMERAL_GLOBS + (args.ephemeral_globs or [])
+    now = time.time()
+
+    sessions = load_sessions(db)
+    candidates = classify(sessions, args.cwd, ephemeral, args.min_age, now)
+    candidates.sort(key=lambda c: c.last_activity)
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "db": str(db),
+                    "apply": args.apply,
+                    "candidates": [
+                        {
+                            "id": c.id,
+                            "title": c.title,
+                            "cwd": c.cwd,
+                            "last_activity": c.last_activity,
+                            "reason": c.reason,
+                        }
+                        for c in candidates
+                    ],
+                },
+                indent=2,
+            )
+        )
+    else:
+        mode = "APPLY" if args.apply else "DRY-RUN"
+        print(f"devin-gc [{mode}] db={db} sessions={len(sessions)} candidates={len(candidates)}")
+        for c in candidates:
+            title = c.title[:60] + ("…" if len(c.title) > 60 else "")
+            print(
+                f"  {c.id:<22} {c.reason:<10} {fmt_time(c.last_activity)}  "
+                f"{c.cwd}\n{'':<22} {'':<10} {'':<16}  {title}"
+            )
+        if not candidates:
+            print("  (none)")
+
+    if not args.apply:
+        if not args.json:
+            eprint("dry-run — re-run with --apply to delete")
+        return 0
+
+    deleted, failed = 0, []
+    for c in candidates:
+        ok, err = devin_rm(c.id)
+        if ok:
+            deleted += 1
+        else:
+            failed.append((c.id, err))
+            eprint(f"warning: devin rm {c.id} failed: {err}")
+
+    known = session_ids(db)
+    pruned = {
+        "locks": prune_locks(known, args.min_age, now, apply=True),
+        "files": {},
+    }
+    if not args.keep_locks:
+        pruned["files"] = prune_orphan_files(known, apply=True)
+
+    wal_checkpoint(db)
+    vacuumed = vacuum(db) if args.vacuum else False
+
+    if not args.json:
+        print(
+            f"deleted={deleted} failed={len(failed)} "
+            f"locks_pruned={len(pruned['locks'])} "
+            f"transcripts_pruned={len(pruned['files'].get('transcripts', []))} "
+            f"summaries_pruned={len(pruned['files'].get('summaries', []))} "
+            f"vacuumed={vacuumed}"
+        )
+        for sid, err in failed:
+            print(f"  FAILED {sid}: {err}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

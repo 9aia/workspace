@@ -70,6 +70,9 @@ Key knobs: `lasius_root`, `install_cmd`/`mutate_cmd`/`mutate_report`,
   (`<id>.env`, `-mutation.json`, `-mutants.txt`, `-mutate.log`).
 - Worktrees `<worktree_base>/wt-<id>` — auto-removed on success,
   kept on failure.
+- Agent sessions are deleted with the worktree on success
+  (`devin-gc --cwd`); sessions for failed runs stay for inspection
+  and are collectible later with a plain `devin-gc`.
 
 ## Known gaps
 

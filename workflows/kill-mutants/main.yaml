@@ -442,6 +442,10 @@ nodes:
       WT="${config.worktree_base}/wt-${ID}"
       lasius --root "${config.lasius_root}" vcs worktree remove "$KM_CHECKOUT" --dir "$WT" --json >/dev/null 2>&1 || true
       rmdir "${config.worktree_base}/wt-${ID}.agent-lock" 2>/dev/null || true
+      # Session hygiene: the triage session's cwd was the worktree —
+      # drop it with the worktree (best effort: devin-gc refuses open
+      # sessions, and a gc failure must not fail the cleanup emit).
+      devin-gc --cwd "$WT" --apply || true
       echo "cleaned $WT"
     emit:
       '0': "kill-mutants.cleaned.${event.match.1}"
