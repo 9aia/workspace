@@ -441,6 +441,7 @@ nodes:
   - kill-mutants.pr.failed.*
   emits:
   - kill-mutants.cleaned.*
+  - kill-mutants.cleanup.failed.*
   max_fires: unlimited
   params:
     cmd: |
@@ -451,12 +452,18 @@ nodes:
       lasius --root "${config.lasius_root}" vcs worktree remove "$KM_CHECKOUT" --dir "$WT" --json >/dev/null 2>&1 || true
       rmdir "${config.worktree_base}/wt-${ID}.agent-lock" 2>/dev/null || true
       # Session hygiene: the triage session's cwd was the worktree —
-      # drop it with the worktree (best effort: devin-gc refuses open
-      # sessions, and a gc failure must not fail the cleanup emit).
-      devin-gc --cwd "$WT" --apply || true
-      echo "cleaned $WT"
+      # drop it with the worktree. A gc failure is reported as
+      # cleanup.failed.* (not silence) — devin-gc refuses open
+      # sessions, so a live session surfaces here honestly.
+      if devin-gc --cwd "$WT" --apply; then
+        echo "cleaned $WT"
+        exit 0
+      fi
+      echo "session cleanup failed for $WT" >&2
+      exit 4
     emit:
       '0': "kill-mutants.cleaned.${event.match.1}"
+      '4': "kill-mutants.cleanup.failed.${event.match.1}"
     timeout: 60
 
 # --- terminal reporting --------------------------------------------------
@@ -473,6 +480,7 @@ nodes:
   - kill-mutants.push.failed.*
   - kill-mutants.pr.failed.*
   - kill-mutants.cleaned.*
+  - kill-mutants.cleanup.failed.*
   - node.exhausted
   emits:
   - kill-mutants.report.done

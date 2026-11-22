@@ -73,6 +73,8 @@ Key knobs: `lasius_root`, `install_cmd`/`mutate_cmd`/`mutate_report`,
   remove stays behind.
 - Agent sessions are deleted on every terminal outcome
   (`devin-gc --cwd`); a plain `devin-gc` sweep collects leftovers.
+  A session-delete failure emits `kill-mutants.cleanup.failed.*`
+  (reported as terminal) instead of passing silently.
 
 ## Known gaps
 
