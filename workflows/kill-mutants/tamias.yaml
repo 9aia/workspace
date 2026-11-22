@@ -8,7 +8,7 @@
 # session (POST /api/sessions/run → sessions.prompt_wait), peregrin
 # owns only event routing, tamias distributes.
 name: kill-mutants
-version: "0.1.2"
+version: "0.1.3"
 type: peregrin-bundle
 description: >-
   Mutation-testing survivor triage — operator-injected

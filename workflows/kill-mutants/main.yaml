@@ -361,6 +361,10 @@ nodes:
         -X POST "${config.node_url}/api/sessions/run" \
         -H 'content-type: application/json' -d "$BODY")
       echo "$RESP" | jq .
+      # Persist the session id for cleanup + reconcile — the run
+      # response carries it as sessionId (PromptWaitResult).
+      mkdir -p "${config.worktree_base}/sessions"
+      printf '%s' "$RESP" | jq -r '.sessionId // .id // empty' > "${config.worktree_base}/sessions/wt-${ID}"
       printf '%s' "$RESP" | jq -e '(.stopReason == "end_turn" or .stopReason == "cancelled") and (.timedOut != true)' >/dev/null
     emit:
       '0': "kill-mutants.agent.done.${event.match.1}"
@@ -451,16 +455,46 @@ nodes:
       WT="${config.worktree_base}/wt-${ID}"
       lasius --root "${config.lasius_root}" vcs worktree remove "$KM_CHECKOUT" --dir "$WT" --json >/dev/null 2>&1 || true
       rmdir "${config.worktree_base}/wt-${ID}.agent-lock" 2>/dev/null || true
-      # Session hygiene: the triage session's cwd was the worktree —
-      # drop it with the worktree. A gc failure is reported as
-      # cleanup.failed.* (not silence) — devin-gc refuses open
-      # sessions, so a live session surfaces here honestly.
-      if devin-gc --cwd "$WT" --apply; then
-        echo "cleaned $WT"
-        exit 0
+      SID=$(cat "${config.worktree_base}/sessions/wt-${ID}" 2>/dev/null || true)
+      case "${event.type}" in
+        # Success paths: pr.created / summarize.clean — delete the
+        # session NOW by exact id (registry file written by agent).
+        kill-mutants.pr.created.*|kill-mutants.summarize.clean.*) MODE=delete ;;
+        # Every failure path: RETAIN the session 7d for debugging —
+        # reconcile expires it via the cleanup ledger.
+        *) MODE=retain ;;
+      esac
+      if [ "$MODE" = "delete" ]; then
+        OUTCOME=failed
+        DETAIL="no session id recorded"
+        if [ -n "$SID" ]; then
+          if sepia delete "$SID" --from "${config.agent}" >/dev/null 2>&1; then
+            OUTCOME=deleted
+            DETAIL=""
+          else
+            DETAIL="sepia delete failed"
+          fi
+        elif devin-gc --cwd "$WT" --apply >/dev/null 2>&1; then
+          OUTCOME=deleted-cwd
+          DETAIL="no session id; cwd sweep"
+        fi
+        jq -nc --argjson ts "$(date +%s)" --arg key "$ID" --arg sid "$SID" \
+          --arg wt "$WT" --arg oc "$OUTCOME" --arg d "$DETAIL" \
+          '{ts:$ts,campaign:"kill-mutants",key:$key,session_id:(if $sid=="" then null else $sid end),worktree:$wt,outcome:$oc,retain_until:null,detail:$d}' \
+          >> "${config.worktree_base}/cleanup-ledger.jsonl"
+        if [ "$OUTCOME" = "failed" ]; then
+          echo "session cleanup failed for $WT" >&2
+          exit 4
+        fi
+        echo "cleaned $WT (session deleted)"
+      else
+        RETAIN_UNTIL=$(( $(date +%s) + 604800 ))
+        jq -nc --argjson ts "$(date +%s)" --arg key "$ID" --arg sid "$SID" \
+          --arg wt "$WT" --argjson ru "$RETAIN_UNTIL" --arg et "${event.type}" \
+          '{ts:$ts,campaign:"kill-mutants",key:$key,session_id:(if $sid=="" then null else $sid end),worktree:$wt,outcome:"retained",retain_until:$ru,detail:$et}' \
+          >> "${config.worktree_base}/cleanup-ledger.jsonl"
+        echo "cleaned $WT (${event.type} — session retained 7d)"
       fi
-      echo "session cleanup failed for $WT" >&2
-      exit 4
     emit:
       '0': "kill-mutants.cleaned.${event.match.1}"
       '4': "kill-mutants.cleanup.failed.${event.match.1}"

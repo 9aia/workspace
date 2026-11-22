@@ -71,10 +71,15 @@ Key knobs: `lasius_root`, `install_cmd`/`mutate_cmd`/`mutate_report`,
 - Worktrees `<worktree_base>/wt-<id>` — removed on every terminal
   outcome (success or failure); a dirty worktree `lasius` refuses to
   remove stays behind.
-- Agent sessions are deleted on every terminal outcome
-  (`devin-gc --cwd`); a plain `devin-gc` sweep collects leftovers.
-  A session-delete failure emits `kill-mutants.cleanup.failed.*`
-  (reported as terminal) instead of passing silently.
+- Agent sessions: the agent node records the session id at
+  `<worktree_base>/sessions/wt-<id>`. Success outcomes (`pr.created.*`,
+  `summarize.clean.*`) delete it immediately via `sepia delete`
+  (devin-gc cwd sweep as fallback); failure outcomes RETAIN it for 7
+  days. Every cleanup appends to `<worktree_base>/cleanup-ledger.jsonl`
+  — the reconcile pass inside `peregrin campaign serve` retries
+  `failed` entries and expires `retained` ones. A session-delete
+  failure emits `kill-mutants.cleanup.failed.*` (reported as
+  terminal); a plain `devin-gc` sweep collects untracked leftovers.
 
 ## Known gaps
 
