@@ -423,14 +423,22 @@ nodes:
       default: "kill-mutants.pr.failed.${event.match.1}"
     timeout: 120
 
-# cleanup: deliverable is on the remote. Artifacts live OUTSIDE the
-# worktree under <worktree_base>/{requests,reports}; failures keep
-# the worktree for debugging.
+# cleanup: deliverable is on the remote OR the run is terminal —
+# every post-route outcome removes the worktree, agent session, and
+# lock. Artifacts live OUTSIDE the worktree under
+# <worktree_base>/{requests,reports}.
 - id: kill-mutants.cleanup
   driver: shell
   on:
   - kill-mutants.pr.created.*
   - kill-mutants.summarize.clean.*
+  - kill-mutants.worktree.failed.*
+  - kill-mutants.install.failed.*
+  - kill-mutants.mutate.failed.*
+  - kill-mutants.summarize.failed.*
+  - kill-mutants.agent.failed.*
+  - kill-mutants.push.failed.*
+  - kill-mutants.pr.failed.*
   emits:
   - kill-mutants.cleaned.*
   max_fires: unlimited

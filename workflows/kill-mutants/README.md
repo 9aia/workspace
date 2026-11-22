@@ -35,7 +35,7 @@ curl -X POST http://127.0.0.1:29173/api/events/inject \
 `reports/mutation/mutation.json`) → `summarize` (counts + mutant
 detail; zero actionable → clean stop) → `agent` (sepia session,
 30 min default) → `push` (`HEAD:refs/heads/test/<id>`) → `pr` →
-`cleanup` → `report`. Failures keep the worktree; success removes it.
+`cleanup` → `report`. Every terminal outcome removes the worktree.
 
 ## Install & config
 
@@ -68,11 +68,11 @@ Key knobs: `lasius_root`, `install_cmd`/`mutate_cmd`/`mutate_report`,
   `~/.local/share/peregrin/serve-history/kill-mutants.jsonl`.
 - Artifacts kept under `<worktree_base>/{requests,reports}/`
   (`<id>.env`, `-mutation.json`, `-mutants.txt`, `-mutate.log`).
-- Worktrees `<worktree_base>/wt-<id>` — auto-removed on success,
-  kept on failure.
-- Agent sessions are deleted with the worktree on success
-  (`devin-gc --cwd`); sessions for failed runs stay for inspection
-  and are collectible later with a plain `devin-gc`.
+- Worktrees `<worktree_base>/wt-<id>` — removed on every terminal
+  outcome (success or failure); a dirty worktree `lasius` refuses to
+  remove stays behind.
+- Agent sessions are deleted on every terminal outcome
+  (`devin-gc --cwd`); a plain `devin-gc` sweep collects leftovers.
 
 ## Known gaps
 
