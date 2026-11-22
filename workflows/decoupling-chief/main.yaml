@@ -1,0 +1,174 @@
+# decoupling-chief — the metaplan as a workflow (PL-033).
+#
+# Chief-of-staff loop: scan the myco ledger for the next ready
+# decoupling plan → run the extraction subflow → loop. Serial by
+# construction (one subflow at a time); phase order is enforced by
+# `config.plan_order`, not by the agents.
+#
+# Data flow: `chief.scan` writes `state/next.json` {plan_id,title};
+# the subworkflow's `flows/extract.yaml` reads it. Plan status is
+# the single source of truth — the chief never edits ledger files,
+# agents update via myco verbs.
+#
+# Triggering: `start` kicks the first scan; `chief.loop` re-kicks
+# after every extract; `chief.tick` (schedule, every 10 min) is the
+# watchdog re-kick — covers crashed subflows and newly-filed items.
+# `chief.idle` means the queue drained; the run stays alive on the
+# schedule tick so late-filed plans still get picked up.
+name: decoupling-chief
+
+annotations:
+  title: Decoupling epic chief-of-staff
+  description: >-
+    Polls the org myco ledger for the next ready decoupling plan
+    (PL-022 phase order), launches the extraction subflow
+    (worktree → sepia agent → gates → push → handoff), loops until
+    idle. Long-running monitor — host under campaign serve.
+  author: 9aia
+  tags: [decoupling, epic, chief-of-staff, myco, sepia]
+  since: "0.1.0"
+
+config:
+  ledger_dir: "/home/luis/GitHub/9aia/workspace/repos/project/project"
+  lasius_root: "/home/luis/GitHub/9aia/workspace"
+  state_dir: "$HOME/.local/share/decoupling-chief"
+  worktree_base: "$HOME/.local/share/decoupling-chief/worktrees"
+  agent: '${env("DECOUPLING_AGENT","devin")}'
+  agent_mode: '${env("DECOUPLING_AGENT_MODE","bypass")}'
+  node_url: "http://127.0.0.1:18787"
+  # Phase order (PL-022): A foundations → B substrate → C integration
+  # → D vcs → E hygiene/epic. PL-023 (telemetry repo) stays LAST of
+  # phase B — blocked on the repo-name decision; move it earlier once
+  # named. PL-033 is the epic workflow itself — runs after the
+  # extractions it orchestrates are stable.
+  plan_order: "PL-024,PL-025,PL-026,PL-027,PL-028,PL-029,PL-030,PL-031,PL-032,PL-023,PL-033"
+  # Plans the chief must never pick (blocked on owner decisions).
+  skip_ids: "PL-023"
+
+capabilities:
+  env:
+    - PEREGRIN_TOKEN
+
+nodes:
+  # --- watchdog tick: re-kick the scan every 10 min ------------------
+  - id: chief.tick
+    driver: schedule
+    on: [start]
+    emits: [chief.tick]
+    max_fires: 500
+    params:
+      cron: "*/10 * * * *"
+      timezone: "America/Sao_Paulo"
+
+  # --- scan: next ready plan → state/next.json → chief.item.ready ---
+  - id: chief.scan
+    driver: shell
+    on: [start, chief.loop, chief.tick]
+    emits: [chief.item.ready, chief.idle]
+    max_fires: 500
+    params:
+      cmd: |
+        set -euo pipefail
+        STATE_DIR='${config.state_dir}'
+        mkdir -p "$STATE_DIR"
+        NEXT="$STATE_DIR/next.json"
+        echo '{}' > "$NEXT"
+        # One ledger read; plan_order decides precedence.
+        myco --dir '${config.ledger_dir}' plan list --json > "$STATE_DIR/plans.json"
+        PICKED=""
+        # Plans that already failed an extract this run are skipped —
+        # a failing plan needs human/agent attention, not a hot loop.
+        # Clear state/failed.txt to re-arm one.
+        FAILED_FILE="$STATE_DIR/failed.txt"
+        touch "$FAILED_FILE"
+        for id in $(printf '%s' '${config.plan_order}' | tr ',' ' '); do
+          case " ${config.skip_ids//,/ } " in *" $id "*) continue;; esac
+          grep -qx "$id" "$FAILED_FILE" && continue
+          st=$(jq -r --arg id "$id" '.[] | select(.id==$id) | .status' "$STATE_DIR/plans.json" | head -1)
+          # Pick the first plan that is not finished/parked. in-progress
+          # counts as ready — an interrupted run resumes where it left off.
+          case "$st" in
+            done|deferred|"") continue;;
+          esac
+          PICKED=$(jq -c --arg id "$id" '.[] | select(.id==$id)' "$STATE_DIR/plans.json" | head -1)
+          break
+        done
+        if [ -n "$PICKED" ]; then
+          jq -n --argjson p "$PICKED" '{plan_id:$p.id, title:$p.title, status:$p.status}' > "$NEXT"
+          echo "next: $(jq -r .plan_id "$NEXT") — $(jq -r .title "$NEXT")"
+          exit 0   # → chief.item.ready
+        fi
+        echo "queue idle — no ready plans"
+        exit 1   # → chief.idle
+      emit:
+        '0': chief.item.ready
+        default: chief.idle
+      timeout: 60
+
+  # --- extract: run the parameterized extraction subflow -------------
+  - id: chief.extract
+    driver: subworkflow
+    on: [chief.item.ready]
+    emits: [chief.extract.done, chief.extract.failed]
+    params:
+      path: flows/extract.yaml
+      inputs:
+        state_file: "${config.state_dir}/next.json"
+        ledger_dir: "${config.ledger_dir}"
+        lasius_root: "${config.lasius_root}"
+        worktree_base: "${config.worktree_base}"
+        state_dir: "${config.state_dir}"
+        agent: "${config.agent}"
+        agent_mode: "${config.agent_mode}"
+        node_url: "${config.node_url}"
+      outputs:
+        extract.done: chief.extract.done
+        extract.failed: chief.extract.failed
+        workflow.failed: chief.extract.failed
+        workflow.cancelled: chief.extract.failed
+
+  # --- report: log verdict; failure arms the skip-list, success loops -
+  - id: chief.report
+    driver: shell
+    on: [chief.extract.done, chief.extract.failed]
+    emits: [chief.loop]
+    max_fires: 500
+    retry:
+      max_attempts: 2
+      delay: 1000
+      backoff: fixed
+    params:
+      cmd: |
+        set -euo pipefail
+        STATE_DIR='${config.state_dir}'
+        mkdir -p "$STATE_DIR"
+        PLAN_ID=$(jq -r '.plan_id // empty' "$STATE_DIR/next.json" 2>/dev/null || true)
+        echo "{\"ts\":\"$(date -Is)\",\"event\":\"${event.type}\",\"plan\":\"$PLAN_ID\"}" \
+          >> "$STATE_DIR/chief.log"
+        if [ "${event.type}" = "chief.extract.failed" ] && [ -n "$PLAN_ID" ]; then
+          # Arm the skip-list so the next scan moves on; clearing
+          # state/failed.txt re-arms the plan for a human/agent retry.
+          grep -qx "$PLAN_ID" "$STATE_DIR/failed.txt" 2>/dev/null || echo "$PLAN_ID" >> "$STATE_DIR/failed.txt"
+        fi
+        echo "chief: ${event.type} plan=$PLAN_ID"
+    emit:
+      '0': chief.loop
+    timeout: 30
+
+  # --- finish: queue idle — log and quiesce until the next tick ------
+  - id: chief.finish
+    driver: shell
+    on: [chief.idle]
+    emits: [chief.complete]
+    max_fires: 500
+    params:
+      cmd: |
+        set -euo pipefail
+        STATE_DIR='${config.state_dir}'
+        mkdir -p "$STATE_DIR"
+        echo '{}' > "$STATE_DIR/next.json"
+        echo "{\"ts\":\"$(date -Is)\",\"event\":\"chief.idle\"}" >> "$STATE_DIR/chief.log"
+        echo "chief: queue idle — waiting for next tick"
+    emit:
+      '0': chief.complete
+    timeout: 30

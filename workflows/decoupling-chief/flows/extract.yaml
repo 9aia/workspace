@@ -1,0 +1,154 @@
+# extract — the parameterized extraction pipeline, invoked by
+# decoupling-chief's `chief.extract` subworkflow node. One plan per
+# run: resolve → agent session → gate → report.
+#
+# The agent is briefed by the ledger itself (`myco resume <plan_id>`
+# in the org ledger) — this file carries no per-plan knowledge, so
+# new plans need zero workflow changes. Agents work in per-repo
+# worktrees under worktree_base/<plan_id-slug>/ via
+# `lasius vcs worktree`; branches `decouple/<plan-slug>` are the
+# deliverable (sturn flow — no PRs).
+name: extract
+
+config:
+  state_file: ""
+  ledger_dir: ""
+  lasius_root: ""
+  worktree_base: ""
+  state_dir: ""
+  agent: "devin"
+  agent_mode: "bypass"
+  node_url: "http://127.0.0.1:18787"
+  check_cmd: "cargo xtask check"
+  agent_timeout_ms: 3600000
+
+capabilities:
+  env:
+    - PEREGRIN_TOKEN
+
+nodes:
+  # --- resolve: read state/next.json, materialize run dirs ------------
+  - id: extract.resolve
+    driver: shell
+    on: [start]
+    emits: [extract.resolved, extract.failed]
+    max_fires: 1
+    params:
+      cmd: |
+        set -euo pipefail
+        PLAN_ID=$(jq -r '.plan_id // empty' '${config.state_file}')
+        [ -n "$PLAN_ID" ] || { echo "no plan_id in ${config.state_file}"; exit 1; }
+        SLUG=$(printf '%s' "$PLAN_ID" | tr 'A-Z' 'a-z')
+        RUN_DIR="${config.worktree_base}/$SLUG"
+        mkdir -p "$RUN_DIR"
+        jq -n --arg id "$PLAN_ID" --arg slug "$SLUG" --arg run "$RUN_DIR" \
+          '{plan_id:$id, slug:$slug, run_dir:$run}' > "$RUN_DIR/run.json"
+        echo "resolved $PLAN_ID → $RUN_DIR"
+      emit:
+        '0': extract.resolved
+        default: extract.failed
+      timeout: 30
+
+  # --- agent: sepia session executes the plan ------------------------
+  - id: extract.agent
+    driver: shell
+    on: [extract.resolved]
+    emits: [extract.agent.done, extract.agent.failed]
+    max_fires: 1
+    retry:
+      max_attempts: 2
+      delay: 10000
+      backoff: fixed
+    params:
+      env:
+        EXTRACT_TOKEN: "${secret.PEREGRIN_TOKEN}"
+      cmd: |
+        set -euo pipefail
+        PLAN_ID=$(jq -r '.plan_id' '${config.state_file}')
+        SLUG=$(printf '%s' "$PLAN_ID" | tr 'A-Z' 'a-z')
+        RUN_DIR="${config.worktree_base}/$SLUG"
+        BRANCH="decouple/$SLUG"
+        BODY=$(jq -n \
+          --arg cwd "$RUN_DIR" \
+          --arg ledger '${config.ledger_dir}' \
+          --arg lasius '${config.lasius_root}' \
+          --arg agent "${config.agent}" \
+          --arg mode "${config.agent_mode}" \
+          --arg plan "$PLAN_ID" \
+          --arg branch "$BRANCH" \
+          --argjson timeout '${config.agent_timeout_ms}' \
+          '{cwd:$cwd, agent:$agent, mode:$mode, timeoutMs:$timeout, text:(
+            "You are executing decoupling plan \($plan) for the 9aia ecosystem.\n\n" +
+            "1. Run `myco --dir \($ledger) resume \($plan)` for the briefing.\n" +
+            "2. The plan names the repos/crates to touch. For EACH repo, create a worktree under \($cwd):\n" +
+            "   `lasius --root \($lasius) vcs worktree add <repo> --dir \($cwd)/<repo> --branch \($branch) --rev origin/main`\n" +
+            "   Work only inside those worktrees.\n" +
+            "3. Execute the plan phases. Follow each repo'"'"'s AGENTS.md. sturn claim before edits where sturn.toml exists.\n" +
+            "4. Gates per touched repo: `cargo xtask check` and `cargo xtask test` must pass.\n" +
+            "5. Commit per repo (conventional messages), push the \($branch) branch. NO PRs — the pushed branch is the deliverable.\n" +
+            "6. When every phase is complete and gates are green: `myco --dir \($ledger) item set \($plan) --status done`, then `myco --dir \($ledger) handoff \($plan)` with what was done and gate status. Keep statuses honest.\n" +
+            "7. If blocked, `myco --dir \($ledger) item set \($plan) --status blocked` + handoff, then STOP — do not improvise scope.\n\n" +
+            "Report: per-repo branches pushed, gate results, handoff id."
+          )}')
+        RESP=$(printf 'header = "authorization: Bearer %s"\n' "$EXTRACT_TOKEN" |
+          curl -sf --max-time 3700 --config - \
+          -X POST "${config.node_url}/api/sessions/run" \
+          -H 'content-type: application/json' -d "$BODY")
+        printf '%s' "$RESP" | jq -e '(.stopReason == "end_turn" or .stopReason == "cancelled") and (.timedOut != true)' >/dev/null
+      emit:
+        '0': extract.agent.done
+        default: extract.agent.failed
+      timeout: 3800
+
+  # --- gate: xtask check in every repo worktree under run_dir ---------
+  - id: extract.gate
+    driver: shell
+    on: [extract.agent.done]
+    emits: [extract.gate.passed, extract.gate.failed]
+    max_fires: 1
+    retry:
+      max_attempts: 1
+      delay: 5000
+      backoff: fixed
+    params:
+      cmd: |
+        set -uo pipefail
+        PLAN_ID=$(jq -r '.plan_id' '${config.state_file}')
+        SLUG=$(printf '%s' "$PLAN_ID" | tr 'A-Z' 'a-z')
+        RUN_DIR="${config.worktree_base}/$SLUG"
+        RC=0
+        FOUND=0
+        for d in "$RUN_DIR"/*/; do
+          [ -f "$d/Cargo.toml" ] || continue
+          FOUND=1
+          echo "== gate: $d"
+          (cd "$d" && ${config.check_cmd}) || RC=1
+        done
+        [ "$FOUND" = 1 ] || { echo "no repo worktrees under $RUN_DIR"; exit 1; }
+        exit $RC
+      emit:
+        '0': extract.gate.passed
+        default: extract.gate.failed
+      timeout: 1800
+
+  # --- report: append verdict, emit terminal --------------------------
+  - id: extract.report
+    driver: shell
+    on: [extract.gate.passed, extract.gate.failed, extract.agent.failed, extract.failed]
+    emits: [extract.done, extract.failed]
+    max_fires: 1
+    params:
+      cmd: |
+        set -euo pipefail
+        STATE_DIR='${config.state_dir}'
+        PLAN_ID=$(jq -r '.plan_id // "?"' '${config.state_file}' 2>/dev/null || echo '?')
+        echo "{\"ts\":\"$(date -Is)\",\"plan\":\"$PLAN_ID\",\"event\":\"${event.type}\"}" \
+          >> "$STATE_DIR/extract.log"
+        case "${event.type}" in
+          extract.gate.passed) exit 0;;
+          *) exit 1;;
+        esac
+      emit:
+        '0': extract.done
+        default: extract.failed
+      timeout: 30
