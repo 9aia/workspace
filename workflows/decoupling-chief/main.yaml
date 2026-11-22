@@ -69,20 +69,21 @@ nodes:
     params:
       cmd: |
         set -euo pipefail
-        STATE_DIR='${config.state_dir}'
+        STATE_DIR="${config.state_dir}"
         mkdir -p "$STATE_DIR"
         NEXT="$STATE_DIR/next.json"
         echo '{}' > "$NEXT"
         # One ledger read; plan_order decides precedence.
-        myco --dir '${config.ledger_dir}' plan list --json > "$STATE_DIR/plans.json"
+        myco --dir "${config.ledger_dir}" plan list --json > "$STATE_DIR/plans.json"
         PICKED=""
         # Plans that already failed an extract this run are skipped —
         # a failing plan needs human/agent attention, not a hot loop.
         # Clear state/failed.txt to re-arm one.
         FAILED_FILE="$STATE_DIR/failed.txt"
         touch "$FAILED_FILE"
+        SKIP_IDS='${config.skip_ids}'
         for id in $(printf '%s' '${config.plan_order}' | tr ',' ' '); do
-          case " ${config.skip_ids//,/ } " in *" $id "*) continue;; esac
+          case " ${SKIP_IDS//,/ } " in *" $id "*) continue;; esac
           grep -qx "$id" "$FAILED_FILE" && continue
           st=$(jq -r --arg id "$id" '.[] | select(.id==$id) | .status' "$STATE_DIR/plans.json" | head -1)
           # Pick the first plan that is not finished/parked. in-progress
@@ -140,7 +141,7 @@ nodes:
     params:
       cmd: |
         set -euo pipefail
-        STATE_DIR='${config.state_dir}'
+        STATE_DIR="${config.state_dir}"
         mkdir -p "$STATE_DIR"
         PLAN_ID=$(jq -r '.plan_id // empty' "$STATE_DIR/next.json" 2>/dev/null || true)
         echo "{\"ts\":\"$(date -Is)\",\"event\":\"${event.type}\",\"plan\":\"$PLAN_ID\"}" \
@@ -164,7 +165,7 @@ nodes:
     params:
       cmd: |
         set -euo pipefail
-        STATE_DIR='${config.state_dir}'
+        STATE_DIR="${config.state_dir}"
         mkdir -p "$STATE_DIR"
         echo '{}' > "$STATE_DIR/next.json"
         echo "{\"ts\":\"$(date -Is)\",\"event\":\"chief.idle\"}" >> "$STATE_DIR/chief.log"

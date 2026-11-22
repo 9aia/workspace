@@ -36,7 +36,7 @@ nodes:
     params:
       cmd: |
         set -euo pipefail
-        PLAN_ID=$(jq -r '.plan_id // empty' '${config.state_file}')
+        PLAN_ID=$(jq -r '.plan_id // empty' "${config.state_file}")
         [ -n "$PLAN_ID" ] || { echo "no plan_id in ${config.state_file}"; exit 1; }
         SLUG=$(printf '%s' "$PLAN_ID" | tr 'A-Z' 'a-z')
         RUN_DIR="${config.worktree_base}/$SLUG"
@@ -64,19 +64,19 @@ nodes:
         EXTRACT_TOKEN: "${secret.PEREGRIN_TOKEN}"
       cmd: |
         set -euo pipefail
-        PLAN_ID=$(jq -r '.plan_id' '${config.state_file}')
+        PLAN_ID=$(jq -r '.plan_id' "${config.state_file}")
         SLUG=$(printf '%s' "$PLAN_ID" | tr 'A-Z' 'a-z')
         RUN_DIR="${config.worktree_base}/$SLUG"
         BRANCH="decouple/$SLUG"
         BODY=$(jq -n \
           --arg cwd "$RUN_DIR" \
-          --arg ledger '${config.ledger_dir}' \
-          --arg lasius '${config.lasius_root}' \
+          --arg ledger "${config.ledger_dir}" \
+          --arg lasius "${config.lasius_root}" \
           --arg agent "${config.agent}" \
           --arg mode "${config.agent_mode}" \
           --arg plan "$PLAN_ID" \
           --arg branch "$BRANCH" \
-          --argjson timeout '${config.agent_timeout_ms}' \
+          --argjson timeout "${config.agent_timeout_ms}" \
           '{cwd:$cwd, agent:$agent, mode:$mode, timeoutMs:$timeout, text:(
             "You are executing decoupling plan \($plan) for the 9aia ecosystem.\n\n" +
             "1. Run `myco --dir \($ledger) resume \($plan)` for the briefing.\n" +
@@ -113,7 +113,7 @@ nodes:
     params:
       cmd: |
         set -uo pipefail
-        PLAN_ID=$(jq -r '.plan_id' '${config.state_file}')
+        PLAN_ID=$(jq -r '.plan_id' "${config.state_file}")
         SLUG=$(printf '%s' "$PLAN_ID" | tr 'A-Z' 'a-z')
         RUN_DIR="${config.worktree_base}/$SLUG"
         RC=0
@@ -140,8 +140,8 @@ nodes:
     params:
       cmd: |
         set -euo pipefail
-        STATE_DIR='${config.state_dir}'
-        PLAN_ID=$(jq -r '.plan_id // "?"' '${config.state_file}' 2>/dev/null || echo '?')
+        STATE_DIR="${config.state_dir}"
+        PLAN_ID=$(jq -r '.plan_id // "?"' "${config.state_file}" 2>/dev/null || echo '?')
         echo "{\"ts\":\"$(date -Is)\",\"plan\":\"$PLAN_ID\",\"event\":\"${event.type}\"}" \
           >> "$STATE_DIR/extract.log"
         case "${event.type}" in
