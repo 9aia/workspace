@@ -23,8 +23,18 @@ config:
   agent_timeout_ms: 3600000
 
 capabilities:
-  env:
+  secrets:
     - PEREGRIN_TOKEN
+
+events:
+  - type: start
+  - type: extract.resolved
+  - type: extract.failed
+  - type: extract.agent.done
+  - type: extract.agent.failed
+  - type: extract.gate.passed
+  - type: extract.gate.failed
+  - type: extract.done
 
 nodes:
   # --- resolve: read state/next.json, materialize run dirs ------------

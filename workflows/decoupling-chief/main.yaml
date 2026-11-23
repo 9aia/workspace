@@ -31,10 +31,10 @@ annotations:
 config:
   ledger_dir: "/home/luis/GitHub/9aia/workspace/repos/project/project"
   lasius_root: "/home/luis/GitHub/9aia/workspace"
-  state_dir: "$HOME/.local/share/decoupling-chief"
-  worktree_base: "$HOME/.local/share/decoupling-chief/worktrees"
-  agent: '${env("DECOUPLING_AGENT","devin")}'
-  agent_mode: '${env("DECOUPLING_AGENT_MODE","bypass")}'
+  state_dir: "/home/luis/.local/share/decoupling-chief"
+  worktree_base: "/home/luis/.local/share/decoupling-chief/worktrees"
+  agent: "devin"
+  agent_mode: "bypass"
   node_url: "http://127.0.0.1:18787"
   # Phase order (PL-022): A foundations → B substrate → C integration
   # → D vcs → E hygiene/epic. PL-023 (telemetry repo) stays LAST of
@@ -46,8 +46,18 @@ config:
   skip_ids: "PL-023"
 
 capabilities:
-  env:
+  secrets:
     - PEREGRIN_TOKEN
+
+events:
+  - type: start
+  - type: chief.tick
+  - type: chief.item.ready
+  - type: chief.idle
+  - type: chief.extract.done
+  - type: chief.extract.failed
+  - type: chief.loop
+  - type: chief.complete
 
 nodes:
   # --- watchdog tick: re-kick the scan every 10 min ------------------
@@ -124,6 +134,8 @@ nodes:
         node_url: "${config.node_url}"
       outputs:
         extract.done: chief.extract.done
+        extract.agent.failed: chief.extract.failed
+        extract.gate.failed: chief.extract.failed
         extract.failed: chief.extract.failed
         workflow.failed: chief.extract.failed
         workflow.cancelled: chief.extract.failed
