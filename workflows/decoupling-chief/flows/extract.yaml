@@ -89,10 +89,13 @@ nodes:
           --argjson timeout "${config.agent_timeout_ms}" \
           '{cwd:$cwd, agent:$agent, mode:$mode, timeoutMs:$timeout, text:(
             "You are executing decoupling plan \($plan) for the 9aia ecosystem.\n\n" +
+            "HARD RULES — violating these kills the run:\n" +
+            "- NEVER run `tamias deploy|install|remove|uninstall|sync`, `systemctl`, `cargo xtask install|pack|package`, or anything that mutates installed services/binaries. The extraction runs INSIDE the services it would restart — a deploy kills your own session. Gates are `cargo xtask check`/`test` inside worktrees only.\n" +
+            "- Work ONLY inside worktrees under \($cwd). Never edit the main clones in the workspace.\n\n" +
             "1. Run `myco --dir \($ledger) resume \($plan)` for the briefing.\n" +
             "2. The plan names the repos/crates to touch. For EACH repo, create a worktree under \($cwd):\n" +
             "   `lasius --root \($lasius) vcs worktree add <repo> --dir \($cwd)/<repo> --branch \($branch) --rev origin/main`\n" +
-            "   Work only inside those worktrees.\n" +
+            "   If a worktree/branch already exists from a previous attempt, inspect it (`git status`, `git log`) and RESUME the work — do not recreate or discard it.\n" +
             "3. Execute the plan phases. Follow each repo'"'"'s AGENTS.md. sturn claim before edits where sturn.toml exists.\n" +
             "4. Gates per touched repo: `cargo xtask check` and `cargo xtask test` must pass.\n" +
             "5. Commit per repo (conventional messages), push the \($branch) branch. NO PRs — the pushed branch is the deliverable.\n" +
