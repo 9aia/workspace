@@ -20,7 +20,7 @@ config:
   agent_mode: "bypass"
   node_url: "http://127.0.0.1:18787"
   check_cmd: "cargo xtask check"
-  agent_timeout_ms: 3600000
+  agent_timeout_ms: 7200000
 
 capabilities:
   secrets:
@@ -103,15 +103,19 @@ nodes:
             "7. If blocked, `myco --dir \($ledger) item set \($plan) --status blocked` + handoff, then STOP — do not improvise scope.\n\n" +
             "Report: per-repo branches pushed, gate results, handoff id."
           )}')
-        RESP=$(printf 'header = "authorization: Bearer %s"\n' "$EXTRACT_TOKEN" |
-          curl -sf --max-time 3700 --config - \
+        HTTP_CODE=$(printf 'header = "authorization: Bearer %s"\n' "$EXTRACT_TOKEN" |
+          curl -s --max-time 7300 --config - \
+          -w '\n%{http_code}' \
           -X POST "${config.node_url}/api/sessions/run" \
-          -H 'content-type: application/json' -d "$BODY")
-        printf '%s' "$RESP" | jq -e '(.stopReason == "end_turn" or .stopReason == "cancelled") and (.timedOut != true)' >/dev/null
+          -H 'content-type: application/json' -d "$BODY" |
+          tee "${config.state_dir}/last-session.txt" | tail -1)
+        BODY_RESP=$(sed '$d' "${config.state_dir}/last-session.txt")
+        [ "$HTTP_CODE" = "200" ] || { echo "sessions/run HTTP $HTTP_CODE"; exit 1; }
+        printf '%s' "$BODY_RESP" | jq -e '(.stopReason == "end_turn" or .stopReason == "cancelled") and (.timedOut != true)' >/dev/null
       emit:
         '0': extract.agent.done
         default: extract.agent.failed
-      timeout: 3800
+      timeout: 7400
 
   # --- gate: xtask check in every repo worktree under run_dir ---------
   - id: extract.gate
