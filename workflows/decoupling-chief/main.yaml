@@ -37,13 +37,13 @@ config:
   agent_mode: "bypass"
   node_url: "http://127.0.0.1:18787"
   # Phase order (PL-022): A foundations → B substrate → C integration
-  # → D vcs → E hygiene/epic. PL-023 (telemetry repo) stays LAST of
-  # phase B — blocked on the repo-name decision; move it earlier once
-  # named. PL-033 is the epic workflow itself — runs after the
-  # extractions it orchestrates are stable.
+  # → D vcs → E hygiene/epic. PL-023 (telemetry repo, name=lampy)
+  # runs after the leaf-port extractions it depends on. PL-033 is
+  # the epic workflow itself — runs after the extractions it
+  # orchestrates are stable.
   plan_order: "PL-024,PL-025,PL-026,PL-027,PL-028,PL-029,PL-030,PL-031,PL-032,PL-023,PL-033"
   # Plans the chief must never pick (blocked on owner decisions).
-  skip_ids: "PL-023"
+  skip_ids: ""
 
 capabilities:
   secrets:
