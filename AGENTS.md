@@ -67,6 +67,9 @@ drives 9aia.com and is mirrored into each repo's docs index).
 - kuda-wired repos (`.kuda/` present): read cards before re-exploring;
   regenerate drifted cards in the same change.
 - English everywhere (code, comments, commit messages).
+- Mechanical changes (bulk edits, renames, generated-file syncs) go
+  through a script with a dry-run mode — plan the diff first, apply
+  after review; faster, safer, and re-runnable.
 - Never edit `node_modules`, `target/`, or generated files.
 - Org LoC reporting: every non-archived repo must appear in
   `repos/.github/packs/loc/loc.yaml` — `lasius doctor` enforces it
