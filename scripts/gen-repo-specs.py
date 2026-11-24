@@ -93,7 +93,44 @@ def toml_str(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def spec_for(name: str, files: list[str], dirs: list[str],
+def provider_blocks(repo: Path) -> str:
+    """`[providers.<ns>]` sections for the org-tool markers present.
+
+    Mirrors the mimus-spec providers shipped in mimus f7f2f58f —
+    presence-level only, all at the default warn severity:
+
+    - kuda: `.kuda/` + `kuda.toml|yaml` + at least one `*.yaml` card
+      (`index.yaml` excluded — it's the generated index, not a card).
+      `index = true` is deliberately not claimed: `.kuda/index.sqlite`
+      is gitignored/rebuildable, so the claim would warn forever on
+      fresh clones.
+    - sturn: `sturn.toml` present.
+    - myco: `myco.toml` present; `worktree = true` when `project/`
+      exists.
+    - cypera: `cypera.toml` present (must parse — provider checks).
+    """
+    blocks: list[str] = []
+    kuda_dir = repo / ".kuda"
+    if kuda_dir.is_dir() and (
+        (repo / "kuda.toml").is_file() or (repo / "kuda.yaml").is_file()
+    ):
+        cards = any(
+            p.suffix == ".yaml" and p.name != "index.yaml"
+            for p in kuda_dir.rglob("*.yaml")
+        )
+        if cards:
+            blocks.append("[providers.kuda]\ncards   = true\n")
+    if (repo / "sturn.toml").is_file():
+        blocks.append("[providers.sturn]\n")
+    if (repo / "myco.toml").is_file():
+        worktree = "worktree = true\n" if (repo / "project").is_dir() else ""
+        blocks.append(f"[providers.myco]\n{worktree}")
+    if (repo / "cypera.toml").is_file():
+        blocks.append("[providers.cypera]\n")
+    return "".join("\n" + b for b in blocks)
+
+
+def spec_for(name: str, repo: Path, files: list[str], dirs: list[str],
              cataloged: bool) -> str:
     files = [f for f in files if f not in FLOOR_FILES]
     req_files = [f for f in files if f in STRUCTURAL_FILES]
@@ -110,6 +147,12 @@ def spec_for(name: str, files: list[str], dirs: list[str],
         "\n[providers.cargo]\npatches = \"org-only\"\norg     = \"9aia\"\n"
         if has_cargo else ""
     )
+    providers = provider_blocks(repo)
+    prov_ref = (
+        "# proposal: proposal-0056  # provider wiring: "
+        "kuda/sturn/myco/cypera markers\n"
+        if providers else ""
+    )
 
     def arr(items: list[str]) -> str:
         return "[\n" + "".join(f"  {toml_str(i)},\n" for i in items) + "]"
@@ -124,7 +167,7 @@ def spec_for(name: str, files: list[str], dirs: list[str],
 # matching — this file only declares the repo's own delta.
 
 # proposal: proposal-0055  # org-ledger proposal authorizing this spec set
-
+{prov_ref}
 family   = "9aia/{name}"
 match    = [{toml_str(name)}]
 severity = "fail"
@@ -136,7 +179,7 @@ dirs = {arr(req_dirs)}
 cover = {arr(cover_files)}
 
 cover_dirs = {arr(cover_dirs)}
-{lasius}{cargo}'''
+{lasius}{cargo}{providers}'''
 
 
 def main() -> int:
@@ -153,7 +196,7 @@ def main() -> int:
         if not (repo / ".git").exists() or repo.name in SKIP:
             continue
         files, dirs = tracked_top_level(repo)
-        text = spec_for(repo.name, files, dirs, repo.name in cataloged)
+        text = spec_for(repo.name, repo, files, dirs, repo.name in cataloged)
         target = repo / "specs" / f"{repo.name}.toml"
         plan.append((repo.name, target, text))
 

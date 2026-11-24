@@ -8,6 +8,7 @@
 # matching — this file only declares the repo's own delta.
 
 # proposal: proposal-0055  # org-ledger proposal authorizing this spec set
+# proposal: proposal-0056  # provider wiring: kuda/sturn/myco/cypera markers
 
 family   = "9aia/delphis"
 match    = ["delphis"]
@@ -40,9 +41,15 @@ cover_dirs = [
   "mcd",
   "scripts",
   "shared",
+  "specs",
   "tests",
   "types",
 ]
 
 [providers.lasius]
 catalog   = true
+
+[providers.myco]
+worktree = true
+
+[providers.cypera]

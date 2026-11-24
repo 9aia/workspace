@@ -27,7 +27,7 @@
 # ~/.local/share/tamias/store/9aia-standard@<version>/specs, or
 # $TAMIAS_HOME/store/… when TAMIAS_HOME is set.)
 name: 9aia-standard
-version: "0.1.0"
+version: "0.2.0"
 type: files
 description: >-
   9aia org conformance specs for `mimus standard` — the 9aia/base
