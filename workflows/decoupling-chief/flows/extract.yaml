@@ -147,7 +147,12 @@ nodes:
           fi
           FOUND=1
           echo "== gate: $d"
-          (cd "$d" && ${config.check_cmd}) || RC=1
+          if [ -d "$d/xtask" ]; then
+            (cd "$d" && ${config.check_cmd}) || RC=1
+          else
+            # No xtask (e.g. bupha) — fall back to plain cargo check.
+            (cd "$d" && cargo check --workspace) || RC=1
+          fi
         done
         [ "$FOUND" = 1 ] || { echo "no repo worktrees under $RUN_DIR"; exit 1; }
         exit $RC
