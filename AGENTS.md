@@ -189,6 +189,19 @@ against spec packs:
   the gate. There is no scheduled sweep — conformance is enforced
   per push.
 
+  **Gate membership** — a repo is gated only when all four name it:
+  a `[[repo]]` in `repos/bupha/libraries/ci-gate/fleet.toml`, a
+  `repos[]` + `capabilities.secrets[]` entry in
+  `repos/bupha/libraries/ci-ingress/main.yaml`, a
+  `cuora://bupha/BUPHA_WH_9AIA_<NAME>` webhook secret (user
+  territory), and a GitHub webhook →
+  `https://ci.luisfuturist.com/hook`. `scripts/fleet-add-9aia.py`
+  keeps the two bupha files in lockstep (dry-run default); secrets
+  and hooks are manual ops. Deployment needs pack bumps +
+  `tamias deploy` — the running watcher reads the store, not the
+  repo. Non-clones (gaia-docus, nuxt-theme-9aia are gitignored dirs
+  inside this repo) and archived strigi stay ungated by design.
+
 Sweep: `scripts/standard.sh [names…]` (uses `MIMUS` env or the
 sibling dev build). Warn violations print but don't fail; fail
 violations do.
