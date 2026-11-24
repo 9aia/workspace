@@ -154,6 +154,28 @@ against spec packs:
   `--apply` writes, `--repo <name>` scopes). Re-run only to
   re-snapshot coverage — edit deliberately otherwise.
 - `templates/README/` — README skeletons per stack (engine/web/bare).
+- `libraries/9aia-standard/` — the spec set as a tamias content pack
+  (`type: files`, no driver). `specs/` inside it is a *generated
+  copy* of the sources above, materialized by
+  `scripts/sync-spec-pack.py` (dry-run default; `--apply` writes,
+  `--check` verifies) — run it in the same change as any spec edit
+  and bump the pack's `version:` in `tamias.yaml`. The pack exists
+  for consumers without a sibling workspace checkout:
+
+  ```bash
+  tamias install --plan ./libraries/9aia-standard   # dry-run
+  tamias install ./libraries/9aia-standard
+  SPEC_DIR="$(tamias info 9aia-standard --json \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["dir"])')/specs"
+  mimus standard --repo <path> --spec "$SPEC_DIR"
+  ```
+
+  `mimus standard --spec` takes files or dirs (non-recursive,
+  union matching) — it does not resolve `tamias:` refs itself;
+  the installed store path is the ref resolution. The fleet sweep
+  keeps using the sibling paths; the pack is for CI/standalone
+  consumers. Pack spec copies are approval-gated identically —
+  spec-guard.py and spec-lock.py cover `libraries/*/specs/`.
 
 Sweep: `scripts/standard.sh [names…]` (uses `MIMUS` env or the
 sibling dev build). Warn violations print but don't fail; fail
@@ -162,7 +184,8 @@ violations do.
 ### specs/ is approval-gated
 
 An agent that can edit a spec can weaken the standard it is measured
-against — treat `specs/` (here and in every clone) as protected:
+against — treat `specs/` (here, in every clone, and in
+`libraries/*/specs/` pack payloads) as protected:
 
 - **Any specs/ change requires a live org proposal** —
   `proposal-NNNN` (status open|done|accepted in

@@ -9,8 +9,9 @@ skipped review still trips `--check`.
   spec-lock.py --write   # (re)generate specs-lock.json
   spec-lock.py --check   # verify lock matches disk (exit 1 on drift)
 
-Covers workspace specs/ and every repos/<name>/specs/ clone.
-strigi (archived) is exempt.
+Covers workspace specs/, every repos/<name>/specs/ clone, and
+every libraries/<pack>/specs/ payload (generated spec-pack copies —
+see libraries/9aia-standard). strigi (archived) is exempt.
 """
 
 import hashlib
@@ -41,6 +42,16 @@ def spec_files() -> dict[str, list[Path]]:
                 out[repo.name] = sorted(
                     p for p in sd.iterdir()
                     if p.suffix in {".toml", ".yaml", ".yml", ".json"}
+                )
+    # spec-pack payloads — libraries/<pack>/specs/ generated copies
+    libs = WS / "libraries"
+    if libs.is_dir():
+        for sd in sorted(libs.glob("*/specs")):
+            if sd.is_dir():
+                out[f"libraries/{sd.parent.name}"] = sorted(
+                    p for p in sd.iterdir()
+                    if p.is_file()
+                    and p.suffix in {".toml", ".yaml", ".yml", ".json"}
                 )
     return out
 

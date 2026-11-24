@@ -1,0 +1,37 @@
+# standard-sweep — fleet `mimus standard` conformance sweep as a
+# peregrin bundle. `tamias install <ref>` fetches this; `tamias deploy
+# standard-sweep` renders into the SHARED campaign service's config
+# dir like every other peregrin-bundle (provider.name: peregrin →
+# one peregrin-campaign.service hosts all bundles' yamls).
+name: standard-sweep
+version: "0.1.0"
+# `peregrin-bundle` routes install/deploy/uninstall through
+# `tamias-driver-peregrin` (capabilities: types ["peregrin-bundle"]).
+type: peregrin-bundle
+description: >-
+  Nightly (and on-demand) sweep of `scripts/standard.sh` — `mimus
+  standard` over every workspace clone against specs/base.toml +
+  repos/<name>/specs/. No git/forge calls; reads the dev checkouts.
+  Real verdict: fail-severity violations → sweep.failed.
+
+provider:
+  # SHARED provider identity — identical to pr-heal/ci-ingress/
+  # docs-deploy/decoupling-chief/handl-verify: one
+  # peregrin-campaign.service hosts every bundle's generated config
+  # in ~/.config/peregrin/serve/ on the shared webhook listener.
+  # Keep `exec` identical — last deploy wins the unit file.
+  name: peregrin
+  services:
+    - name: campaign
+      exec: >-
+        ~/.local/bin/peregrin campaign serve ~/.config/peregrin/serve
+        --listen 127.0.0.1:29173 --path /hook
+        --history-dir ~/.local/share/peregrin/serve-history
+        --queue-store-dir ~/.local/share/peregrin/serve-queues
+      env_file: "~/.config/peregrin/env"
+      workdir: "~"
+      restart: on-failure
+  # No ingress: schedule + `campaign run`/`submit` only — nothing
+  # listens for forge webhooks. The sweep is fleet-internal; per-push
+  # gating stays with bupha's ci-gate fleet (per-repo scripts/ci.sh).
+  verbs: [run, logs]

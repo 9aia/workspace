@@ -5,8 +5,9 @@ specs/ is the org's conformance truth: an agent that can edit a
 spec can weaken the standard it is measured against. This guard
 makes specs/ changes attributable:
 
-  1. Any change under specs/ (this repo's specs/ or the workspace
-     pack) must reference a live org proposal — `proposal-NNNN`
+  1. Any change under specs/ (this repo's specs/, the workspace
+     pack, or a libraries/*/specs/ pack payload) must reference a
+     live org proposal — `proposal-NNNN`
      (or `P-NNNN`) in a `# proposal:` spec header or in the commit
      messages being introduced. The proposal must exist in the org
      ledger (repos/project/project/proposals/) with status
@@ -35,6 +36,16 @@ from pathlib import Path
 PROPOSAL_RE = re.compile(r"proposal-(\d{4})|\bP-(\d{3})\b")
 LIVE_STATUSES = {"open", "done", "accepted"}
 SEV_RANK = {"fail": 2, "warn": 1}
+
+# SPECS_PATHS covers the workspace floor plus every spec-pack
+# payload — libraries/*/specs/ holds generated copies that are just
+# as able to weaken the standard (see libraries/9aia-standard).
+_WS = Path(__file__).resolve().parent.parent
+SPECS_PATHS = ["specs/"] + [
+    f"libraries/{p.parent.name}/specs/"
+    for p in sorted((_WS / "libraries").glob("*/specs"))
+    if p.is_dir()
+]
 
 
 def sh(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
@@ -155,7 +166,7 @@ def main() -> int:
 
     # specs/ changes: committed range + (optionally) worktree
     deleted: set[str] = set()
-    status = git(repo, "diff", "--name-status", f"{merge_base}...HEAD", "--", "specs/")
+    status = git(repo, "diff", "--name-status", f"{merge_base}...HEAD", "--", *SPECS_PATHS)
     changed = []
     for line in status.splitlines():
         if not line.strip():
@@ -167,7 +178,7 @@ def main() -> int:
             deleted.add(path)
         changed.append(path)
     if staged:
-        st = git(repo, "status", "--porcelain", "-uall", "--", "specs/")
+        st = git(repo, "status", "--porcelain", "-uall", "--", *SPECS_PATHS)
         for line in st.splitlines():
             if line.strip():
                 path = line[3:]

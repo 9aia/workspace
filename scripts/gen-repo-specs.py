@@ -17,6 +17,10 @@ Usage:
     gen-repo-specs.py            # dry-run: print the plan
     gen-repo-specs.py --apply    # write specs/ into each clone
     gen-repo-specs.py --repo tamias [--apply]
+
+Regenerated repo specs leave the 9aia-standard pack payload stale —
+follow with `scripts/sync-spec-pack.py --apply` (and bump the pack's
+version in libraries/9aia-standard/tamias.yaml).
 """
 
 import subprocess
