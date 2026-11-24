@@ -1,0 +1,9 @@
+# {{REPO_NAME}}
+
+{{ONE_LINE_DESCRIPTION}}
+
+{{OPTIONAL_EXTRA_SECTIONS}}
+
+## License
+
+MIT.

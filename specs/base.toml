@@ -1,0 +1,97 @@
+# 9aia/base — the floor every 9aia org repo must meet.
+#
+# severity=fail: the floor is clean fleet-wide (LICENSE + project/
+# worktrees fixed 2026-11-24; strigi is archived and exempt from
+# the sweep). Per-repo specs live in `<repo>/specs/` and compose
+# with this pack at sweep time (union matching — see
+# scripts/standard.sh).
+#
+# `files` exact entries are REQUIRED (missing → violation).
+# `cover`/`cover_dirs` whitelist tracked files for the unlisted
+# check — coverage only, never required. `unlisted` runs against
+# the UNION of all matched specs, so repo specs contribute their
+# own trees; base only needs the shared floor plus plausible
+# catch-alls.
+#
+# proposal: proposal-0055  # org-ledger proposal authorizing this spec set
+
+family   = "9aia/base"
+match    = []                # every repo
+severity = "fail"
+
+files = [
+  "README.md",
+  "AGENTS.md",
+  "SECURITY.md",
+  "CONTRIBUTING.md",
+  "cypera.toml",
+  "LICENSE",
+  ".gitignore",
+]
+
+cover = [
+  # manifests & lockfiles — every stack variant the fleet carries
+  "*.toml", "*.json", "*.jsonl", "*.yaml", "*.yml", "*.lock",
+  "*.lockb", "*.md", "*.txt",
+  # js/ts toolchain
+  "*.ts", "*.tsx", "*.js", "*.jsx", "*.mjs", "*.cjs", "*.vue",
+  "*.css", "*.scss", "*.html",
+  # rust
+  "*.rs",
+  # python (scripts/, tooling)
+  "*.py",
+  # config & meta dotfiles — enumerated, never `.*`
+  # (a blanket dot-glob would whitelist committed .env secrets)
+  ".gitignore", ".gitattributes", ".gitmodules", ".editorconfig",
+  ".mailmap", ".nvmrc", ".python-version", ".nuxtrc", ".env.example",
+  # misc root artifacts seen across the fleet
+  "Makefile", "NOTICE", "LICENSE*", "CNAME", "VERSION", "TODO.md",
+  "todo.md", "SPEC.md", "DESIGN.md", "Dockerfile", "*.sh",
+  # org catalog + wiring manifests (required per-repo where the
+  # wiring applies — here they are coverage so optional wirings
+  # don't trip unlisted)
+  "myco.toml", "mimus.toml", "sturn.toml", "kuda.toml", "tarsi.toml",
+  "tamias.yml", "tamias.yaml", "cuora.toml", "skills-lock.json",
+  "action.yml", "renovate.json", ".release-it.json",
+  "workspace.code-workspace", "*.code-workspace",
+]
+
+cover_dirs = [
+  # agent/tooling config trees
+  ".agents", ".cargo", ".claude", ".config", ".cursor", ".devin",
+  ".github", ".githooks", ".hooks", ".idea", ".kuda", ".vscode",
+  ".vitepress",
+  # worktrees (gitignored on main — listed for the fs-walk fallback
+  # and for repos that track them, e.g. theme sites)
+  "docs", "project",
+  # rust workspace anatomy
+  "crates", "xtask", "src", "tests", "test", "benches", "fuzz",
+  "examples", "modules", "rules", "libraries", "actions",
+  # js/ts app anatomy
+  "app", "apps", "packages", "components", "layouts", "pages",
+  "public", "assets", "static", "styles", "types", "shared",
+  "server", "client", "plugins", "middleware", "stores", "composables",
+  # content/site anatomy
+  "content", "blog", "tutorials", "how-to", "reference", "explanation",
+  "slides", "presentation", "ecosystem", "members", "data", "seeds",
+  # misc plausible trees
+  "api", "bin", "cli", "campaigns", "provider", "protocol", "projects",
+  "mcd", "web", "workflows", "ci", "bench", "dist", "tools", "vendor",
+  "scripts", "db", "migrations", "locales", "i18n", "img", "images",
+  "fonts", "icons", "theme", "themes", "templates", "specs",
+]
+
+# The docs contract's one hard negative: git history + tarsi release
+# notes are the changelog — a CHANGELOG.md must never appear.
+[path."CHANGELOG.md"]
+exists = false
+
+# lasius-workspace facts — the 9aia floor's org-membership half.
+# remote_org: origin must live under github.com/9aia/.
+# policy: lasius.toml [policy] require_files/require_worktrees hold
+# (AGENTS.md present, project/ worktree present).
+# catalog is NOT here — projects.yaml catalogs public product repos
+# only; per-repo specs opt in where they belong.
+[providers.lasius]
+remote_org = true
+policy    = true
