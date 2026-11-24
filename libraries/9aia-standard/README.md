@@ -13,6 +13,10 @@ pure payload, no driver).
   `repos/<name>/specs/`; regenerate with
   `scripts/sync-spec-pack.py --apply` in the same change as any
   spec edit.
+- `ci-standard.sh` — the per-repo CI leg runner. Gated repos exec
+  it from `scripts/ci.sh` after installing this pack; it rebuilds
+  the spec `match` selection for sha-suffixed bupha worktrees and
+  runs `mimus standard` (see below).
 
 ## Consume
 
@@ -41,6 +45,34 @@ tamias publish ./libraries/9aia-standard
 The workspace fleet sweep (`scripts/standard.sh`) keeps using the
 sibling paths (`specs/` + `repos/<name>/specs/`) — the pack is for
 consumers outside the workspace layout (CI, standalone clones).
+
+## CI leg
+
+Every gated repo's `scripts/ci.sh` ends with the same block
+(rolled out by `scripts/rollout-ci-standard.py`): it installs this
+pack from the git ref — a cache hit after the first fetch — and
+execs `ci-standard.sh` from the store payload:
+
+```bash
+tamias install --no-bins \
+  'git:github.com/9aia/workspace//libraries/9aia-standard'
+bash "$(tamias info 9aia-standard@<ver> --json \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["dir"])')/ci-standard.sh"
+```
+
+`ci-standard.sh` runs `mimus standard --repo <worktree>` against a
+materialized spec dir: the pack's `specs/` plus the repo's own
+`specs/` (repo files shadow pack copies by filename). Because
+bupha worktrees are named `<base>-<org>-<repo>-<sha>`, the script
+rewrites `match = [...]` to `match = []` on exactly the specs whose
+globs cover the repo (name taken from the `origin` remote) — the
+same selection the sweep gets from the real directory name.
+
+Missing `tamias`/`mimus` skips the leg with a warning; fail-severity
+violations exit nonzero and fail the gate. Expect two warn-level
+provider notes in gate runs (`lasius.toml` absent outside the
+workspace, `project/` ledger worktree not in the pushed tree) —
+warns print but never gate.
 
 ## Approval gating
 

@@ -177,6 +177,18 @@ against spec packs:
   consumers. Pack spec copies are approval-gated identically —
   spec-guard.py and spec-lock.py cover `libraries/*/specs/`.
 
+  **CI leg** — every gated repo's `scripts/ci.sh` ends with the
+  same block (rolled out by `scripts/rollout-ci-standard.py`,
+  idempotent): `tamias install` the pack from its git ref, then
+  exec `ci-standard.sh` from the store payload. The runner
+  materializes the spec set (pack `specs/` + the repo's own
+  `specs/`, repo files shadowing pack copies) and rebuilds `match`
+  selection for sha-suffixed bupha worktrees, so `mimus standard`
+  applies the same base+family specs the sweep does. Missing
+  tamias/mimus skips with a warning; fail-severity violations fail
+  the gate. There is no scheduled sweep — conformance is enforced
+  per push.
+
 Sweep: `scripts/standard.sh [names…]` (uses `MIMUS` env or the
 sibling dev build). Warn violations print but don't fail; fail
 violations do.

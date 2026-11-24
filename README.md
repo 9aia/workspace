@@ -101,7 +101,10 @@ against declarative conformance specs:
 - `libraries/9aia-standard/` — the spec set as a tamias pack
   (`type: files`); `scripts/sync-spec-pack.py --apply` refreshes
   its `specs/` copies. Install it to run `mimus standard` without
-  a workspace checkout — see the pack README.
+  a workspace checkout — see the pack README. The pack also ships
+  `ci-standard.sh`, the runner every gated repo's `scripts/ci.sh`
+  execs after installing the pack — `mimus standard` runs per push
+  in CI, no scheduled sweep.
 
 ```bash
 scripts/standard.sh            # fleet sweep (mimus standard per repo)
