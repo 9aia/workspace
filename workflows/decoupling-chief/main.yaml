@@ -121,6 +121,7 @@ nodes:
     driver: subworkflow
     on: [chief.item.ready]
     emits: [chief.extract.done, chief.extract.failed]
+    max_fires: 500
     params:
       path: flows/extract.yaml
       inputs:
