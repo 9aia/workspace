@@ -40,11 +40,11 @@ inside.
 | `repos/.github` | org profile + community health |
 | `repos/ci-e2e` | bupha CI e2e validation scratch repo (private) |
 | `repos/strigi` | natural-language CLI assistant — **archived** |
-| `repos/delphis` | remote dev environments over Tailscale — **archived** |
+| `repos/delphis` | remote dev environments over Tailscale — revived (P-001: publish/attach for humans + agents) |
 
-This workspace root is itself the `9aia/workspace` repo. `strigi` and
-`delphis` are archived on GitHub (read-only) — cloned for reference,
-do not push to them.
+This workspace root is itself the `9aia/workspace` repo. `strigi` is
+archived on GitHub (read-only) — cloned for reference, do not push to
+it.
 
 Org-level shared content lives at the workspace root: `workflows/`
 (peregrin campaign bundles), `libraries/` (tamias packs — e.g.
