@@ -141,6 +141,11 @@ Reader model — every page serves one journey: **evaluator** (index,
   exempt via `cypera.toml [check] skip`.
 - **`cypera check`** enforces the mechanical parts (required pages per
   profile, quadrant links, tutorial count); substance stays editorial.
+- **`scripts/docs-check.sh` is a synced copy** — canonical source is
+  `repos/tamias/scripts/docs-check.sh` (includes the hook-env
+  `GIT_DIR`/`GIT_INDEX_FILE` scrub). When the gate changes, copy it
+  to every clone's `scripts/docs-check.sh` verbatim; drift between
+  copies has already happened once (T-072).
 
 ## Specs & standards (mimus standard)
 
