@@ -102,6 +102,15 @@ config:
   # carries no per-check name — the bupha job `key` (repo or
   # repo:<job>) is the lane identity; this only labels the prompt.
   ci_check_name: "ci"
+  # Comma-separated GitHub logins allowed to auto-merge — checked
+  # against the PR AUTHOR (`author` field of `lasius forge pr list`)
+  # in the merge node. The bupha worker's [access] forge gate already
+  # keeps untrusted senders from producing a green ci.job.completed;
+  # this is the second lock so a merge can never fire for an author
+  # outside the list. Empty = deny all (fail closed).
+  # Default = current 9aia org members; override per deployment via
+  # deploy.d config when the roster or watched org differs.
+  trusted_actors: "eccarneiro,Kruceo,luisfuturist,vinicenter"
   # Default branch — push events on other refs never enqueue ci-jobs
   # (PR branches are covered by pull_request deliveries).
   default_branch: "main"
@@ -250,7 +259,13 @@ nodes:
         ref: "refs/heads/${event.payload.base_ref}"
         sha: "${event.payload.sha}"
         event: pull_request
-        sender: "${event.payload.actor}"
+        # The PR AUTHOR, not the action's sender — a maintainer
+        # syncing/reopening a fork PR would otherwise launder an
+        # untrusted head through a trusted `actor`. The bupha worker's
+        # [access] forge check gates on this.
+        # `author` falls back to `actor` on pre-`author` drivers —
+        # deploy-order safe (weaker gate, never a breakage).
+        sender: "${event.payload.author:-${event.payload.actor}}"
         deliveryId: "${event.payload.delivery_id}"
         queue: "latest"
         context: "ci/bupha"
@@ -332,6 +347,14 @@ nodes:
         echo "skip: no open PR with head_sha=$SHA"
         exit 3
       fi
+      # Trusted-author gate — second lock behind the bupha worker's
+      # [access] sender check: only listed authors auto-merge.
+      AUTHOR=$(printf '%s' "$JSON" | jq -r --arg sha "$SHA" '[.[] | select(.head_sha == $sha)] | .[0].author // empty')
+      [ -n "$AUTHOR" ] || { echo "skip: PR #$NUMBER has no author identity"; exit 3; }
+      case ",${config.trusted_actors}," in
+        *",${AUTHOR},"*) ;;
+        *) echo "skip: PR #$NUMBER author '$AUTHOR' not in trusted_actors"; exit 3 ;;
+      esac
       echo "merging PR #$NUMBER (head $SHA)"
       if OUT=$(lasius --root "${config.lasius_root}" forge pr merge "${config.checkout}" "$NUMBER" --method squash --delete-branch --json 2>&1); then
         printf '%s\n' "$OUT"

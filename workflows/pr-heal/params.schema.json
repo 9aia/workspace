@@ -62,6 +62,11 @@
       "type": "string",
       "description": "lasius workspace root (--root flag); repo args are checkout paths so any lasius.toml workspace works.",
       "default": "/home/luis/GitHub/9aia/workspace"
+    },
+    "trusted_actors": {
+      "type": "string",
+      "description": "Comma-separated GitHub logins allowed to auto-merge — checked against the PR AUTHOR in the merge node (and bupha sender gate upstream). Empty = deny all (fail closed).",
+      "default": ""
     }
   },
   "additionalProperties": true
