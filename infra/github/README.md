@@ -39,8 +39,9 @@ pulumi stack init prod
 ```
 
 State backend: Cloudflare R2 DIY backend — bucket `9aia-pulumi-state`
-on the same account as ktbhealth's (`PULUMI_BACKEND_URL` is set in the
-workflow env; locally export the same plus):
+on the 9aia (Gaia) CF account `cf5a672bcf77fc2318ec7f0a709c1f77`
+(`PULUMI_BACKEND_URL` is set in the workflow env; locally export the
+same plus):
 
 ```sh
 export AWS_ACCESS_KEY_ID=...        # R2 token, cuora://9aia/r2-access-key-id

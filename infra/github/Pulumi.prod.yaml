@@ -1,3 +1,4 @@
 config:
   9aia:manageOrgWebhook: "false"
   github:owner: 9aia
+encryptionsalt: v1:Z9EorN/aORs=:v1:YcZB4TFC+vJKOqM3:bgnqEyV1PEZdUMQQ6zxPLac2RW4A3g==
