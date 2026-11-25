@@ -1,0 +1,4 @@
+name: 9aia-github
+runtime: nodejs
+description: 9aia org GitHub policies — repo merge settings, branch rulesets, trusted-contributors team
+main: .

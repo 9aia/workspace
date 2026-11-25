@@ -32,7 +32,7 @@ files = [
 cover = [
   # manifests & lockfiles — every stack variant the fleet carries
   "*.toml", "*.json", "*.jsonl", "*.yaml", "*.yml", "*.lock",
-  "*.lockb", "*.md", "*.txt",
+  "*.lockb", "bun.lock", "*.md", "*.txt",
   # js/ts toolchain
   "*.ts", "*.tsx", "*.js", "*.jsx", "*.mjs", "*.cjs", "*.vue",
   "*.css", "*.scss", "*.html",
@@ -76,7 +76,7 @@ cover_dirs = [
   "slides", "presentation", "ecosystem", "members", "data", "seeds",
   # misc plausible trees
   "api", "bin", "cli", "campaigns", "provider", "protocol", "projects",
-  "mcd", "web", "workflows", "ci", "bench", "dist", "tools", "vendor",
+  "infra", "mcd", "web", "workflows", "ci", "bench", "dist", "tools", "vendor",
   "scripts", "db", "migrations", "locales", "i18n", "img", "images",
   "fonts", "icons", "theme", "themes", "templates", "specs",
 ]

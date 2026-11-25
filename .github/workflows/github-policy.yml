@@ -1,0 +1,53 @@
+name: github-policy
+
+on:
+  push:
+    branches: [main]
+    paths: ["infra/github/**"]
+  pull_request:
+    paths: ["infra/github/**"]
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+env:
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AWS_REGION: auto
+  PULUMI_BACKEND_URL: s3://9aia-pulumi-state?endpoint=2c03574ae47e534415b762ab3c474815.r2.cloudflarestorage.com&s3ForcePathStyle=true&region=auto
+  PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+  # GITHUB_TOKEN (workflow default) lacks admin:org — use the org-admin
+  # PAT stored as ORG_ADMIN_TOKEN (same pattern as ktbhealth/workspace).
+  GITHUB_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
+  GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
+
+jobs:
+  preview:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/github
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - uses: pulumi/actions@v6
+        with:
+          only-install: true
+      - run: pulumi preview --stack prod
+
+  up:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/github
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - uses: pulumi/actions@v6
+        with:
+          only-install: true
+      - run: pulumi up --yes --skip-preview --stack prod
