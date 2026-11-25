@@ -111,6 +111,12 @@ config:
   # Default = current 9aia org members; override per deployment via
   # deploy.d config when the roster or watched org differs.
   trusted_actors: "eccarneiro,Kruceo,luisfuturist,vinicenter"
+  # Org team whose ACTIVE members are trusted authors — checked live
+  # via the teams API (GITHUB_TOKEN secret) in the merge node.
+  # trusted_actors stays as a break-glass extra allowlist; either
+  # grants trust. Empty team = static list only.
+  trusted_team: "trusted-contributors"
+  trusted_org: "9aia"
   # Default branch — push events on other refs never enqueue ci-jobs
   # (PR branches are covered by pull_request deliveries).
   default_branch: "main"
@@ -131,6 +137,7 @@ config:
 capabilities:
   secrets:
     - PEREGRIN_TOKEN
+    - GITHUB_TOKEN
     - BUPHA_WH_*
 
 # Declared event contracts. `ci.job.completed` is EXTERNAL — no node
@@ -338,6 +345,8 @@ nodes:
   - pr-heal.merge.conflict.*
   max_fires: unlimited
   params:
+    env:
+      GH_TOKEN: "${secret.GITHUB_TOKEN}"
     cmd: |
       set -uo pipefail
       SHA='${event.match.1}'
@@ -348,13 +357,21 @@ nodes:
         exit 3
       fi
       # Trusted-author gate — second lock behind the bupha worker's
-      # [access] sender check: only listed authors auto-merge.
+      # [access] sender check: static list OR active member of
+      # config.trusted_team. API failure fails closed (skip).
       AUTHOR=$(printf '%s' "$JSON" | jq -r --arg sha "$SHA" '[.[] | select(.head_sha == $sha)] | .[0].author // empty')
       [ -n "$AUTHOR" ] || { echo "skip: PR #$NUMBER has no author identity"; exit 3; }
+      TRUSTED=0
       case ",${config.trusted_actors}," in
-        *",${AUTHOR},"*) ;;
-        *) echo "skip: PR #$NUMBER author '$AUTHOR' not in trusted_actors"; exit 3 ;;
+        *",${AUTHOR},"*) TRUSTED=1 ;;
       esac
+      if [ "$TRUSTED" = 0 ] && [ -n "${config.trusted_team:-}" ]; then
+        STATE=$(curl -sf --max-time 15 -H "Authorization: Bearer ${GH_TOKEN}" \
+          "https://api.github.com/orgs/${config.trusted_org}/teams/${config.trusted_team}/memberships/${AUTHOR}" \
+          | jq -r '.state // empty' 2>/dev/null || true)
+        [ "$STATE" = "active" ] && TRUSTED=1
+      fi
+      [ "$TRUSTED" = 1 ] || { echo "skip: PR #$NUMBER author '$AUTHOR' not trusted"; exit 3; }
       echo "merging PR #$NUMBER (head $SHA)"
       if OUT=$(lasius --root "${config.lasius_root}" forge pr merge "${config.checkout}" "$NUMBER" --method squash --delete-branch --json 2>&1); then
         printf '%s\n' "$OUT"
